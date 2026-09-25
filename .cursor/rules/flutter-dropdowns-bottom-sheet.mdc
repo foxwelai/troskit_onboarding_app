@@ -1,0 +1,11 @@
+---
+description: Onboarding app dropdowns must use bottom sheets
+globs: **/*.dart
+alwaysApply: true
+---
+
+# Dropdowns = bottom sheets
+
+- Do not use `DropdownButton` / `DropdownButtonFormField` / `DropdownMenu` for field selection.
+- Use `BottomSheetSelectField` (or `showOptionBottomSheet`) from `lib/core/widgets/ui_kit.dart`.
+- Scan success must play beep via `SoundService().playScanBeep()` (same asset as troskit_app).
