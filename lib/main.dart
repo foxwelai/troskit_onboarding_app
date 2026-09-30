@@ -13,6 +13,7 @@ import 'features/auth/splash_page.dart';
 import 'features/barcode_scanner_page.dart';
 import 'features/home/home_page.dart';
 import 'features/products/add_product_page.dart';
+import 'features/products/ai_images_page.dart';
 import 'features/shops/onboard_shop_page.dart';
 import 'features/shops/shop_detail_page.dart';
 import 'features/shops/store_details_page.dart';
@@ -62,6 +63,10 @@ final _router = GoRouter(
     GoRoute(
       path: '/home',
       builder: (context, state) => const HomePage(),
+    ),
+    GoRoute(
+      path: '/ai-images',
+      builder: (context, state) => const AiImagesPage(),
     ),
     GoRoute(
       path: '/shops/new',

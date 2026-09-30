@@ -71,21 +71,14 @@ class _LoginPageState extends State<LoginPage> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Center(
-                          child: Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: AppTheme.primarySoft.withValues(alpha: 0.35),
-                              borderRadius: BorderRadius.circular(24),
-                            ),
-                            child: Image.asset(
-                              'assets/logos/troskit-logo.png',
-                              width: 76,
-                              height: 76,
-                              fit: BoxFit.contain,
-                            ),
+                          child: Image.asset(
+                            'assets/logos/troskit-logo.png',
+                            width: 168,
+                            height: 168,
+                            fit: BoxFit.contain,
                           ),
                         ),
-                        const SizedBox(height: 24),
+                        const SizedBox(height: 20),
                         Text(
                           'Troskit Onboarding',
                           textAlign: TextAlign.center,

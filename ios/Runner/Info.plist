@@ -57,6 +57,8 @@
 	<string>Camera is used to scan product barcodes while onboarding shop inventory.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Photo library access is used to attach product images.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save AI-enhanced product images to your photo library.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

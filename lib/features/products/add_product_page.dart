@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../api.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/ui_kit.dart';
+import 'ai_enhancer_sheets.dart';
 
 class _ProductColorOpt {
   String name;
@@ -431,7 +432,12 @@ class _AddProductPageState extends State<AddProductPage> {
               ..clear()
               ..addAll(urls);
           }
-          final shopDesc = (shopProduct?['description'] ?? '').toString().trim();
+          final shopDesc = (shopProduct?['description'] ??
+                  source?['description'] ??
+                  master?['description'] ??
+                  '')
+              .toString()
+              .trim();
           if (shopDesc.isNotEmpty && _description.text.trim().isEmpty) {
             _description.text = shopDesc;
           }
@@ -495,13 +501,83 @@ class _AddProductPageState extends State<AddProductPage> {
     if (pickedFiles.isEmpty) return;
 
     for (final x in pickedFiles) {
-      final newFile = File(x.path);
+      var newFile = File(x.path);
+      if (!mounted) return;
+      final ai = await showAiEnhancerSheet(
+        context: context,
+        originalFile: newFile,
+      );
+      newFile = ai.file;
+      if (!mounted) return;
       setState(() {
         _newImages.add(newFile);
       });
       final photoIndex = _existingImageUrls.length + _newImages.length - 1;
       await _promptColorForPhoto(photoIndex: photoIndex, localFile: newFile);
     }
+  }
+
+  /// AI Enhancer from an existing gallery thumb (edit later).
+  Future<void> _enhanceGalleryPhoto(int photoIndex) async {
+    final isExisting = photoIndex < _existingImageUrls.length;
+    late File sourceFile;
+    String? remoteUrl;
+
+    if (isExisting) {
+      remoteUrl = _existingImageUrls[photoIndex];
+      try {
+        sourceFile = await OnboardingApi.downloadImageToTemp(remoteUrl);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+        return;
+      }
+    } else {
+      sourceFile = _newImages[photoIndex - _existingImageUrls.length];
+    }
+
+    if (!mounted) return;
+    final result = await showAiEnhancerSheet(
+      context: context,
+      originalFile: sourceFile,
+      remotePreviewUrl: remoteUrl,
+    );
+    if (!mounted) return;
+
+    // Existing remote: only swap when user picked the AI image.
+    if (isExisting) {
+      if (!result.usedAi) return;
+      setState(() {
+        final colorName = _photoColorNames.remove(photoIndex);
+        _existingImageUrls.removeAt(photoIndex);
+        // Shift color keys for remaining existing thumbs after this index.
+        final shifted = <int, String>{};
+        _photoColorNames.forEach((k, v) {
+          if (k < photoIndex) {
+            shifted[k] = v;
+          } else if (k > photoIndex) {
+            // existing after removal: index - 1; new images later shift by -1 then +1 at end → net 0 for new?
+            // After removeAt, indices above photoIndex decrease by 1.
+            shifted[k - 1] = v;
+          }
+        });
+        _photoColorNames
+          ..clear()
+          ..addAll(shifted);
+        _newImages.add(result.file);
+        final newIndex = _existingImageUrls.length + _newImages.length - 1;
+        if (colorName != null) _photoColorNames[newIndex] = colorName;
+      });
+      return;
+    }
+
+    // Local new image: replace in place (AI or re-confirmed original).
+    final localIdx = photoIndex - _existingImageUrls.length;
+    setState(() {
+      _newImages[localIdx] = result.file;
+    });
   }
 
   Future<void> _showImagePickerSheet() async {
@@ -706,21 +782,21 @@ class _AddProductPageState extends State<AddProductPage> {
   }) {
     return {
       'brand_name': _product.text.trim(),
-      'product': _product.text.trim(),
-      'item_name': _name.text.trim(),
+        'product': _product.text.trim(),
+        'item_name': _name.text.trim(),
       'description': description,
-      'barcode': _hasBarcode ? _barcode.text.trim() : '',
-      'has_barcode': _hasBarcode ? 'true' : 'false',
-      'pricing_type': _hasBarcode ? 'fixed' : _pricingType,
-      'category_uuid': _categoryUuid!,
-      'tax_status': _taxStatus,
-      'average_selling_price': _avgPrice.text.trim(),
+        'barcode': _hasBarcode ? _barcode.text.trim() : '',
+        'has_barcode': _hasBarcode ? 'true' : 'false',
+        'pricing_type': _hasBarcode ? 'fixed' : _pricingType,
+        'category_uuid': _categoryUuid!,
+        'tax_status': _taxStatus,
+        'average_selling_price': _avgPrice.text.trim(),
       'shop_selling_price':
           _pricingType == 'dynamic' ? '0' : _shopPrice.text.trim(),
       'selling_price':
           _pricingType == 'dynamic' ? '0' : _shopPrice.text.trim(),
-      'gst_percent': _taxStatus == 'taxable' ? '20' : '0',
-      'stock_qty': finalStock,
+        'gst_percent': _taxStatus == 'taxable' ? '20' : '0',
+        'stock_qty': finalStock,
       'keep_image_urls': jsonEncode(keepUrls),
       'colors': jsonEncode(colors),
     };
@@ -732,14 +808,14 @@ class _AddProductPageState extends State<AddProductPage> {
   }) {
     return _isEdit
         ? OnboardingApi.updateProduct(
-            shopUuid: widget.shopUuid,
-            productUuid: widget.productUuid!,
-            fields: fields,
+              shopUuid: widget.shopUuid,
+              productUuid: widget.productUuid!,
+              fields: fields,
             imageFiles: imageFiles,
-          )
+            )
         : OnboardingApi.addProduct(
-            shopUuid: widget.shopUuid,
-            fields: fields,
+              shopUuid: widget.shopUuid,
+              fields: fields,
             imageFiles: imageFiles,
           );
   }
@@ -750,22 +826,22 @@ class _AddProductPageState extends State<AddProductPage> {
   }) {
     final warn =
         uploadWarnOverride ?? saved['image_upload_warning']?.toString();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          warn == null || warn.isEmpty
-              ? (_isEdit
-                  ? 'Product updated — pending admin verification'
-                  : 'Product submitted — pending admin verification')
-              : (_isEdit
-                  ? 'Product saved, but image upload failed'
-                  : 'Product submitted, but image upload failed'),
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            warn == null || warn.isEmpty
+                ? (_isEdit
+                    ? 'Product updated — pending admin verification'
+                    : 'Product submitted — pending admin verification')
+                : (_isEdit
+                    ? 'Product saved, but image upload failed'
+                    : 'Product submitted, but image upload failed'),
+          ),
+          backgroundColor: warn == null || warn.isEmpty
+              ? const Color(0xFF15803D)
+              : const Color(0xFFC2410C),
         ),
-        backgroundColor: warn == null || warn.isEmpty
-            ? const Color(0xFF15803D)
-            : const Color(0xFFC2410C),
-      ),
-    );
+      );
   }
 
   Widget _photoThumb({
@@ -839,6 +915,22 @@ class _AddProductPageState extends State<AddProductPage> {
                     ),
                   ),
                 ],
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          top: 4,
+          left: 4,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.65),
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: () => _enhanceGalleryPhoto(photoIndex),
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.auto_awesome, size: 14, color: Colors.white),
               ),
             ),
           ),
@@ -1159,6 +1251,29 @@ class _AddProductPageState extends State<AddProductPage> {
                             ),
                           ),
                         ],
+                      ),
+                      const SizedBox(height: 14),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: () async {
+                            Navigator.pop(ctx);
+                            await _enhanceGalleryPhoto(photoIndex);
+                          },
+                          icon: const Icon(Icons.auto_awesome, size: 18),
+                          label: const Text(
+                            'Enhance with AI',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AppTheme.primary,
+                            side: const BorderSide(color: AppTheme.primary),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
                       ),
                       const SizedBox(height: 16),
 
@@ -1566,26 +1681,26 @@ class _AddProductPageState extends State<AddProductPage> {
           // 1. Photo Gallery Card
           SectionCard(
             title: 'Product Photos',
-            subtitle: 'Add product photos for the shop catalog.',
+            subtitle: 'Add product photos for the shop catalog. Tap ✦ to enhance with AI.',
             children: [
               SizedBox(
                 height: 122,
                 child: ListView(
                   scrollDirection: Axis.horizontal,
-                  children: [
+                          children: [
                     for (var i = 0; i < _existingImageUrls.length; i++) ...[
                       _photoThumb(
                         photoIndex: i,
                         child: Image.network(
                           _existingImageUrls[i],
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => const Center(
-                            child: Icon(
-                              Icons.broken_image_outlined,
-                              color: AppTheme.muted,
-                            ),
-                          ),
-                        ),
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) => const Center(
+                                  child: Icon(
+                                    Icons.broken_image_outlined,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
                         onRemove: () =>
                             _removeGalleryAt(existing: true, index: i),
                       ),

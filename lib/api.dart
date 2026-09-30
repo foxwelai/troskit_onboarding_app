@@ -526,4 +526,56 @@ class OnboardingApi {
     _productsCache.clear();
     return Map<String, dynamic>.from(body);
   }
+
+  /// Download a remote product image into a temp file (for AI enhance on existing photos).
+  static Future<File> downloadImageToTemp(String url) async {
+    final uri = Uri.parse(url);
+    final res = await http
+        .get(uri, headers: {'ngrok-skip-browser-warning': 'true'})
+        .timeout(const Duration(seconds: 45));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception('Failed to download image (${res.statusCode})');
+    }
+    final pathLower = uri.path.toLowerCase();
+    final ext = pathLower.endsWith('.png')
+        ? 'png'
+        : pathLower.endsWith('.webp')
+            ? 'webp'
+            : 'jpg';
+    final file = File(
+      '${Directory.systemTemp.path}/troskit_dl_${DateTime.now().millisecondsSinceEpoch}.$ext',
+    );
+    await file.writeAsBytes(res.bodyBytes, flush: true);
+    return file;
+  }
+
+  /// ChatGPT / GPT Image enhance. Prompts are loaded server-side from ai_agent_prompts.
+  static Future<Map<String, dynamic>> enhanceProductImage({
+    required File file,
+    required String featureKey,
+  }) async {
+    final token = await _token();
+    final uri = Uri.parse('${ApiConstants.baseUrl}/onboarding/ai/enhance');
+    final req = http.MultipartRequest('POST', uri);
+    req.headers['Accept'] = 'application/json';
+    req.headers['ngrok-skip-browser-warning'] = 'true';
+    if (token != null) req.headers['Authorization'] = 'Bearer $token';
+    req.fields['feature_key'] = featureKey;
+
+    final path = file.path.toLowerCase();
+    final mime = path.endsWith('.png')
+        ? MediaType('image', 'png')
+        : path.endsWith('.webp')
+            ? MediaType('image', 'webp')
+            : MediaType('image', 'jpeg');
+    req.files.add(
+      await http.MultipartFile.fromPath('file', file.path, contentType: mime),
+    );
+
+    final streamed = await req.send().timeout(const Duration(seconds: 120));
+    final res = await http.Response.fromStream(streamed);
+    final body = await _parseOrThrow(res, 'AI enhance failed');
+    if (body is! Map) throw Exception('Unexpected server response');
+    return Map<String, dynamic>.from(body);
+  }
 }

@@ -229,6 +229,18 @@ class _HomePageState extends State<HomePage> {
                   child: OutlinedButton.icon(
                     onPressed: () {
                       Navigator.pop(ctx);
+                      context.push('/ai-images');
+                    },
+                    icon: const Icon(Icons.auto_awesome, size: 16),
+                    label: const Text('AI Images'),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
                       _checkAccessAndLoadMe();
                     },
                     icon: const Icon(Icons.sync_rounded, size: 16),
