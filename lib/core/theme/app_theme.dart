@@ -13,7 +13,7 @@ class AppTheme {
   static const Color canvas = Color(0xFFF7F7F8);
   static const Color surface = Colors.white;
 
-  static const String logoAsset = 'assets/logos/troskit-logo.png';
+  static const String logoAsset = 'assets/logos/troskit-logo.webp';
   static const String shopBannerAsset = 'assets/images/shop-banner.png';
 
   static const SystemUiOverlayStyle systemUi = SystemUiOverlayStyle(
@@ -117,11 +117,16 @@ class AppTheme {
           ),
         ),
       ),
-      floatingActionButtonTheme: const FloatingActionButtonThemeData(
+      floatingActionButtonTheme: FloatingActionButtonThemeData(
         backgroundColor: primary,
         foregroundColor: Colors.white,
         elevation: 4,
-        shape: CircleBorder(),
+        shape: const StadiumBorder(),
+        extendedTextStyle: textTheme.labelLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+          fontSize: 14,
+          color: Colors.white,
+        ),
       ),
       navigationBarTheme: NavigationBarThemeData(
         height: 64,

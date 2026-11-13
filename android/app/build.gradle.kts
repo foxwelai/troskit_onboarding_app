@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,8 +8,15 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+}
+
 android {
-    namespace = "ai.foxwel.troskit_onboarding_app"
+    namespace = "ai.foxwel.troskitOnboardingApp"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -16,8 +26,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        create("release") {
+            val keyFile = keystoreProperties["storeFile"] as? String
+            if (keyFile != null) {
+                storeFile = rootProject.file(keyFile)
+                storePassword = keystoreProperties["storePassword"] as? String
+                keyAlias = keystoreProperties["keyAlias"] as? String
+                keyPassword = keystoreProperties["keyPassword"] as? String
+            }
+        }
+    }
+
     defaultConfig {
-        applicationId = "ai.foxwel.troskit_onboarding_app"
+        applicationId = "ai.foxwel.troskitOnboardingApp"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -27,10 +49,16 @@ android {
 
     buildTypes {
         release {
-            // TODO: replace with a release keystore before Play Store upload.
-            signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = false
-            isShrinkResources = false
+            val releaseSigning = signingConfigs.getByName("release")
+            signingConfig =
+                if (releaseSigning.storeFile != null) {
+                    releaseSigning
+                } else {
+                    signingConfigs.getByName("debug")
+                }
+            // R8 minify + resource shrink for Play Store release.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

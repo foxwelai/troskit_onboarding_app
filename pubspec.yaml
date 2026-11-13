@@ -1,7 +1,7 @@
 name: troskit_onboarding_app
 description: Troskit employee app — onboard shops and catalog products.
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.8+9
 
 environment:
   sdk: ^3.12.2
@@ -21,6 +21,13 @@ dependencies:
   geolocator: ^13.0.2
   path_provider: ^2.1.6
   gal: ^2.3.3
+  camera: ^0.11.2
+  flutter_image_compress: ^2.5.1
+  in_app_update: ^5.0.0
+  image: ^4.12.0
+  lottie: ^3.6.1
+  url_launcher: ^6.3.3
+  google_maps_flutter: ^2.18.1
 
 dev_dependencies:
   flutter_test:
@@ -34,7 +41,9 @@ flutter:
     - google_fonts/
     - assets/logos/
     - assets/images/
+    - assets/animations/
     - assets/sounds/store-beep.mp3
+
 
 flutter_launcher_icons:
   android: "launcher_icon"

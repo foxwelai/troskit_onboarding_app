@@ -105,7 +105,7 @@ class _BlockedAccessPageState extends State<BlockedAccessPage> {
                               ),
                             ),
                             child: Image.asset(
-                              'assets/logos/troskit-logo.png',
+                              AppTheme.logoAsset,
                               width: 72,
                               height: 72,
                               fit: BoxFit.contain,

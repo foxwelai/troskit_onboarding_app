@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../api.dart';
+import '../../core/services/app_update_service.dart';
+import '../../core/services/maintenance_service.dart';
+import '../../core/services/recent_shops_store.dart';
 import '../../core/theme/app_theme.dart';
+
 import '../../core/widgets/ui_kit.dart';
 
 class HomePage extends StatefulWidget {
@@ -13,28 +17,48 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int _tabIndex = 0;
   late Future<List<dynamic>> _futureShops;
-  late Future<List<dynamic>> _futureActivity;
+  late Future<List<dynamic>> _futureUpcoming;
+  late Future<List<Map<String, dynamic>>> _futureRecent;
+  Future<List<dynamic>>? _futureActivity;
+  bool _activityLoaded = false;
   Map<String, dynamic>? _me;
   final _searchCtrl = TextEditingController();
-  String _searchQuery = '';
-  String _shopStatusFilter = 'all'; // all | pending | approved | rejected
+  /// Local to My Shops — avoids rebuilding Home + Activity on each keystroke.
+  final ValueNotifier<String> _searchQuery = ValueNotifier('');
 
   @override
   void initState() {
     super.initState();
+    _me = OnboardingApi.cachedEmployee;
     _futureShops = OnboardingApi.listShops();
-    _futureActivity = OnboardingApi.listActivityFeed();
+    _futureUpcoming = OnboardingApi.listUpcomingOnboardings();
+    _futureRecent = RecentShopsStore.top(limit: 5);
+    // Activity feed deferred until the tab is first opened.
     _checkAccessAndLoadMe();
+    AppUpdateService.checkForUpdate();
   }
 
   @override
   void dispose() {
     _searchCtrl.dispose();
+    _searchQuery.dispose();
     super.dispose();
+  }
+
+  void _ensureActivityLoaded({bool forceRefresh = false}) {
+    if (_activityLoaded && !forceRefresh && _futureActivity != null) return;
+    _activityLoaded = true;
+    _futureActivity = OnboardingApi.listActivityFeed(forceRefresh: forceRefresh);
+  }
+
+  void _onTabSelected(int idx) {
+    if (idx == 2) _ensureActivityLoaded();
+    setState(() => _tabIndex = idx);
   }
 
   Future<void> _checkAccessAndLoadMe() async {
     try {
+      // Reuse short-TTL cache from splash when available.
       final me = await OnboardingApi.me();
       if (!mounted) return;
       setState(() => _me = me);
@@ -58,18 +82,32 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _reloadShops({bool forceRefresh = true}) {
+  void _reloadShops({bool forceRefresh = true, bool refreshMe = false}) {
+    if (forceRefresh) {
+      MaintenanceService.instance.checkStatus();
+    }
     setState(() {
       _futureShops = OnboardingApi.listShops(forceRefresh: forceRefresh);
+      _futureUpcoming =
+          OnboardingApi.listUpcomingOnboardings(forceRefresh: forceRefresh);
+      _futureRecent = RecentShopsStore.top(limit: 5);
     });
-    _checkAccessAndLoadMe();
+    if (refreshMe || _me == null) {
+      _checkAccessAndLoadMe();
+    }
   }
 
   void _reloadActivity({bool forceRefresh = true}) {
+    if (forceRefresh) {
+      MaintenanceService.instance.checkStatus();
+    }
     setState(() {
-      _futureActivity = OnboardingApi.listActivityFeed(forceRefresh: forceRefresh);
+      _activityLoaded = true;
+      _futureActivity =
+          OnboardingApi.listActivityFeed(forceRefresh: forceRefresh);
     });
   }
+
 
   String get _agentName {
     final n = (_me?['name'] ?? '').toString().trim();
@@ -282,14 +320,17 @@ class _HomePageState extends State<HomePage> {
             IndexedStack(
               index: _tabIndex,
               children: [
-                _buildHomeTab(),
-                _buildMyShopsTab(),
-                _buildHistoryTab(),
+                _KeepAlive(child: _buildHomeTab()),
+                _KeepAlive(child: _buildMyShopsTab()),
+                // Built only after first visit so we don't fetch activity at boot.
+                _activityLoaded
+                    ? _KeepAlive(child: _buildHistoryTab())
+                    : const SizedBox.shrink(),
               ],
             ),
             GlassmorphismCapsuleBar(
               selectedIndex: _tabIndex,
-              onTabSelected: (idx) => setState(() => _tabIndex = idx),
+              onTabSelected: _onTabSelected,
             ),
           ],
         ),
@@ -311,7 +352,10 @@ class _HomePageState extends State<HomePage> {
             children: [
               Image.asset(AppTheme.logoAsset, height: 42, fit: BoxFit.contain),
               const Spacer(),
-              _headerIconButton(Icons.refresh_rounded, onTap: _reloadShops),
+              _headerIconButton(
+                Icons.refresh_rounded,
+                onTap: () => _reloadShops(refreshMe: true),
+              ),
               const SizedBox(width: 8),
               GestureDetector(
                 onTap: _openProfileSheet,
@@ -332,8 +376,12 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
         Expanded(
-          child: FutureBuilder<List<dynamic>>(
-            future: _futureShops,
+          child: FutureBuilder<List<Object?>>(
+            future: Future.wait([
+              _futureShops,
+              _futureUpcoming,
+              _futureRecent,
+            ]),
             builder: (context, snap) {
               if (snap.connectionState != ConnectionState.done) {
                 return const Padding(
@@ -345,9 +393,40 @@ class _HomePageState extends State<HomePage> {
                 return _shopsError(snap.error);
               }
 
-              final shops = (snap.data ?? [])
+              final shops = ((snap.data?[0] as List?) ?? [])
                   .map((e) => Map<String, dynamic>.from(e as Map))
                   .toList();
+              final upcoming = ((snap.data?[1] as List?) ?? [])
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
+              final recentRaw = ((snap.data?[2] as List?) ?? [])
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
+              final shopsByUuid = {
+                for (final s in shops)
+                  if (s['uuid'] != null) s['uuid'].toString(): s,
+              };
+              final upcomingUuids = upcoming
+                  .map((s) => s['uuid']?.toString())
+                  .whereType<String>()
+                  .toSet();
+              // Prefer live shop payload; fall back to local snapshot.
+              final recentlyOpened = recentRaw
+                  .map((r) {
+                    final uuid = r['uuid']?.toString();
+                    if (uuid == null) return null;
+                    final live = shopsByUuid[uuid];
+                    if (live != null) return live;
+                    return {
+                      'uuid': uuid,
+                      'shop_name': r['shop_name'] ?? 'Shop',
+                      'owner_name': r['owner_name'] ?? '—',
+                      'phone_no': r['phone_no'] ?? '',
+                    };
+                  })
+                  .whereType<Map<String, dynamic>>()
+                  .toList();
+
               final approved = shops
                   .where(
                     (s) =>
@@ -357,28 +436,24 @@ class _HomePageState extends State<HomePage> {
                         'approved',
                   )
                   .length;
-              final pending = shops
+              final pendingShops = shops
                   .where(
                     (s) =>
                         (s['verification_status'] ?? '')
                             .toString()
-                            .toLowerCase() !=
-                        'approved',
+                            .toLowerCase() ==
+                        'pending',
                   )
-                  .length;
-              final upcoming = shops
-                  .where(
-                    (s) =>
-                        (s['verification_status'] ?? '')
-                            .toString()
-                            .toLowerCase() !=
-                        'approved',
-                  )
+                  .toList();
+              // Pending verification = recently added / awaiting admin, excluding
+              // enquiry-assigned shops shown under Upcoming Onboardings.
+              final pendingVerification = pendingShops
+                  .where((s) => !upcomingUuids.contains(s['uuid']?.toString()))
                   .toList();
 
               return RefreshIndicator(
                 color: AppTheme.primary,
-                onRefresh: () async => _reloadShops(),
+                onRefresh: () async => _reloadShops(refreshMe: true),
                 child: ListView(
                   padding: EdgeInsets.fromLTRB(
                     18,
@@ -405,15 +480,49 @@ class _HomePageState extends State<HomePage> {
                           child: _metricCard(
                             icon: Icons.inventory_2_outlined,
                             title: 'Pending Approval',
-                            value: '$pending',
+                            value: '${pendingShops.length}',
                             trend: '12.4%',
                           ),
                         ),
                       ],
                     ),
+                    if (upcoming.isNotEmpty) ...[
+                      const SizedBox(height: 22),
+                      const Text(
+                        'Upcoming Onboardings',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.ink,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      for (final shop in upcoming.take(8)) ...[
+                        _upcomingShopTile(shop),
+                        const SizedBox(height: 12),
+                      ],
+                    ],
+                    if (recentlyOpened.isNotEmpty) ...[
+                      const SizedBox(height: 22),
+                      const Text(
+                        'Recently Opened',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.ink,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      for (final shop in recentlyOpened) ...[
+                        _upcomingShopTile(shop),
+                        const SizedBox(height: 12),
+                      ],
+                    ],
                     const SizedBox(height: 22),
                     const Text(
-                      'Upcoming Onboarding',
+                      'Pending Verification',
                       style: TextStyle(
                         fontSize: 17,
                         fontWeight: FontWeight.w700,
@@ -422,15 +531,15 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    if (upcoming.isEmpty)
+                    if (pendingVerification.isEmpty)
                       const EmptyState(
                         icon: Icons.assignment_turned_in_outlined,
                         title: 'You\'re all caught up',
                         subtitle:
-                            'New shops assigned by admin will show here for setup.',
+                            'Recently added shops awaiting admin verification will show here.',
                       )
                     else
-                      for (final shop in upcoming.take(8)) ...[
+                      for (final shop in pendingVerification.take(8)) ...[
                         _upcomingShopTile(shop),
                         const SizedBox(height: 12),
                       ],
@@ -706,57 +815,69 @@ class _HomePageState extends State<HomePage> {
       children: [
         Column(
           children: [
-        Container(
-          color: Colors.white,
-          padding: const EdgeInsets.fromLTRB(6, 8, 14, 8),
-          child: Row(
-            children: [
-              IconButton(
-                onPressed: () => setState(() => _tabIndex = 0),
-                icon: const Icon(
-                  Icons.arrow_back_ios_new_rounded,
-                  size: 18,
-                ),
-              ),
-              const Expanded(
-                child: Text(
-                  'My Shops',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w800,
-                    color: AppTheme.ink,
-                  ),
-                ),
-              ),
-              _headerIconButton(Icons.refresh_rounded, onTap: _reloadShops),
-            ],
-          ),
-        ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-              child: Row(
+            Container(
+              color: Colors.white,
+              child: Column(
                 children: [
-                  Expanded(
-                    child: SearchInputField(
-                      hint: 'Search by Shop Name',
-                      controller: _searchCtrl,
-                      onChanged: (q) =>
-                          setState(() => _searchQuery = q.trim().toLowerCase()),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 8, 14, 0),
+                    child: Row(
+                      children: [
+                        IconButton(
+                          onPressed: () => setState(() => _tabIndex = 0),
+                          icon: const Icon(
+                            Icons.arrow_back_ios_new_rounded,
+                            size: 18,
+                          ),
+                        ),
+                        const Expanded(
+                          child: Text(
+                            'My Shops',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                              color: AppTheme.ink,
+                            ),
+                          ),
+                        ),
+                        _headerIconButton(
+                          Icons.refresh_rounded,
+                          onTap: () => _reloadShops(refreshMe: true),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: AppTheme.line),
-                    ),
-                    child: IconButton(
-                      onPressed: () {},
-                      icon: const Icon(Icons.tune_rounded, color: AppTheme.ink),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: SearchInputField(
+                            hint: 'Search by Shop Name',
+                            controller: _searchCtrl,
+                            onChanged: (q) =>
+                                _searchQuery.value = q.trim().toLowerCase(),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: AppTheme.line),
+                          ),
+                          child: IconButton(
+                            onPressed: () {},
+                            icon: const Icon(
+                              Icons.tune_rounded,
+                              color: AppTheme.ink,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -777,39 +898,6 @@ class _HomePageState extends State<HomePage> {
                   final allShops = (snap.data ?? [])
                       .map((e) => Map<String, dynamic>.from(e as Map))
                       .toList();
-
-                  final pendingCount = allShops
-                      .where(
-                        (s) =>
-                            (s['verification_status'] ?? '')
-                                .toString()
-                                .toLowerCase() ==
-                            'pending',
-                      )
-                      .length;
-
-                  final filtered = allShops.where((s) {
-                    final status = (s['verification_status'] ?? 'pending')
-                        .toString()
-                        .toLowerCase();
-                    if (_shopStatusFilter != 'all' &&
-                        status != _shopStatusFilter) {
-                      return false;
-                    }
-                    if (_searchQuery.isEmpty) return true;
-                    final name = (s['shop_name'] ?? '')
-                        .toString()
-                        .toLowerCase();
-                    final owner = (s['owner_name'] ?? '')
-                        .toString()
-                        .toLowerCase();
-                    final phone = (s['phone_no'] ?? '')
-                        .toString()
-                        .toLowerCase();
-                    return name.contains(_searchQuery) ||
-                        owner.contains(_searchQuery) ||
-                        phone.contains(_searchQuery);
-                  }).toList();
 
                   if (allShops.isEmpty) {
                     return EmptyState(
@@ -834,43 +922,87 @@ class _HomePageState extends State<HomePage> {
                     );
                   }
 
-                  return RefreshIndicator(
-                    color: AppTheme.primary,
-                    onRefresh: () async => _reloadShops(),
-                    child: ListView(
-                      padding: EdgeInsets.fromLTRB(
-                        16,
-                        0,
-                        16,
-                        bottomInset > 0 ? bottomInset + 110 : 120,
-                      ),
-                      children: [
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: [
-                              _statusPill('all', 'All (${allShops.length})'),
-                              _statusPill('pending', 'Pending ($pendingCount)'),
-                              _statusPill('processing', 'Processing'),
-                              _statusPill('shipped', 'Shipped'),
-                              _statusPill('delivered', 'Delivered'),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        if (filtered.isEmpty)
-                          EmptyState(
-                            icon: Icons.search_off_rounded,
-                            title: 'No matching shops',
-                            subtitle: 'Try another search or filter.',
-                          )
-                        else
-                          for (final shop in filtered) ...[
-                            _buildShopListCard(shop),
-                            const SizedBox(height: 10),
-                          ],
-                      ],
-                    ),
+                  return ValueListenableBuilder<String>(
+                    valueListenable: _searchQuery,
+                    builder: (context, query, _) {
+                      final filtered = allShops.where((s) {
+                        if (query.isEmpty) return true;
+                        final name =
+                            (s['shop_name'] ?? '').toString().toLowerCase();
+                        final owner =
+                            (s['owner_name'] ?? '').toString().toLowerCase();
+                        final phone =
+                            (s['phone_no'] ?? '').toString().toLowerCase();
+                        return name.contains(query) ||
+                            owner.contains(query) ||
+                            phone.contains(query);
+                      }).toList();
+
+                      String statusOf(Map<String, dynamic> s) =>
+                          (s['verification_status'] ?? 'pending')
+                              .toString()
+                              .toLowerCase();
+
+                      final approved = filtered
+                          .where((s) => statusOf(s) == 'approved')
+                          .toList();
+                      final pending = filtered
+                          .where((s) => statusOf(s) == 'pending')
+                          .toList();
+                      final rejected = filtered
+                          .where((s) => statusOf(s) == 'rejected')
+                          .toList();
+
+                      return RefreshIndicator(
+                        color: AppTheme.primary,
+                        onRefresh: () async =>
+                            _reloadShops(refreshMe: true),
+                        child: filtered.isEmpty
+                            ? ListView(
+                                physics:
+                                    const AlwaysScrollableScrollPhysics(),
+                                padding: EdgeInsets.fromLTRB(
+                                  16,
+                                  8,
+                                  16,
+                                  bottomInset > 0
+                                      ? bottomInset + 110
+                                      : 120,
+                                ),
+                                children: const [
+                                  EmptyState(
+                                    icon: Icons.search_off_rounded,
+                                    title: 'No matching shops',
+                                    subtitle: 'Try another search.',
+                                  ),
+                                ],
+                              )
+                            : ListView(
+                                padding: EdgeInsets.fromLTRB(
+                                  16,
+                                  4,
+                                  16,
+                                  bottomInset > 0
+                                      ? bottomInset + 110
+                                      : 120,
+                                ),
+                                children: [
+                                  ..._shopSection(
+                                    title: 'All Approved',
+                                    shops: approved,
+                                  ),
+                                  ..._shopSection(
+                                    title: 'Pending',
+                                    shops: pending,
+                                  ),
+                                  ..._shopSection(
+                                    title: 'Rejected',
+                                    shops: rejected,
+                                  ),
+                                ],
+                              ),
+                      );
+                    },
                   );
                 },
               ),
@@ -899,36 +1031,30 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _statusPill(String key, String label) {
-    final selected = _shopStatusFilter == key;
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: Material(
-        color: selected ? AppTheme.primary : Colors.white,
-        borderRadius: BorderRadius.circular(999),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(999),
-          onTap: () => setState(() => _shopStatusFilter = key),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(
-                color: selected ? AppTheme.primary : AppTheme.line,
-              ),
-            ),
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-                color: selected ? Colors.white : AppTheme.ink,
-              ),
-            ),
+  List<Widget> _shopSection({
+    required String title,
+    required List<Map<String, dynamic>> shops,
+  }) {
+    if (shops.isEmpty) return const [];
+    return [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(2, 14, 2, 10),
+        child: Text(
+          '$title (${shops.length})',
+          style: const TextStyle(
+            fontSize: 15.5,
+            fontWeight: FontWeight.w800,
+            color: AppTheme.ink,
+            letterSpacing: -0.2,
           ),
         ),
       ),
-    );
+      for (final shop in shops)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: _buildShopListCard(shop),
+        ),
+    ];
   }
 
   Widget _buildShopListCard(Map<String, dynamic> shop) {
@@ -1135,7 +1261,8 @@ class _HomePageState extends State<HomePage> {
           child: FutureBuilder<List<dynamic>>(
             future: _futureActivity,
             builder: (context, snap) {
-              if (snap.connectionState != ConnectionState.done) {
+              if (_futureActivity == null ||
+                  snap.connectionState != ConnectionState.done) {
                 return const Padding(
                   padding: EdgeInsets.all(16),
                   child: SkeletonListLoader(count: 6, itemHeight: 80),
@@ -1442,10 +1569,31 @@ class _HomePageState extends State<HomePage> {
       title: 'Could not load shops',
       subtitle: userMsg,
       action: ElevatedButton.icon(
-        onPressed: _reloadShops,
+        onPressed: () => _reloadShops(refreshMe: true),
         icon: const Icon(Icons.refresh_rounded),
         label: const Text('Try again'),
       ),
     );
+  }
+}
+
+/// Keeps tab state when switching IndexedStack indices.
+class _KeepAlive extends StatefulWidget {
+  const _KeepAlive({required this.child});
+  final Widget child;
+
+  @override
+  State<_KeepAlive> createState() => _KeepAliveState();
+}
+
+class _KeepAliveState extends State<_KeepAlive>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }

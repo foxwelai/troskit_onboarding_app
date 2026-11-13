@@ -1,4 +1,4 @@
-package ai.foxwel.troskit_onboarding_app
+package ai.foxwel.troskitOnboardingApp
 
 import io.flutter.embedding.android.FlutterActivity
 

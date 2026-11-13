@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../api.dart';
+import '../../core/services/maintenance_service.dart';
 import '../../core/theme/app_theme.dart';
 
 class SplashPage extends StatefulWidget {
@@ -42,6 +43,14 @@ class _SplashPageState extends State<SplashPage>
   }
 
   Future<void> _boot() async {
+    // 1. Cold start maintenance check
+    final maintStatus = await MaintenanceService.instance.checkStatus();
+    if (!mounted) return;
+    if (maintStatus.isMaintenance) {
+      context.go('/maintenance');
+      return;
+    }
+
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('employee_token');
     if (!mounted) return;
@@ -50,6 +59,7 @@ class _SplashPageState extends State<SplashPage>
       if (mounted) context.go('/login');
       return;
     }
+
     try {
       await OnboardingApi.me();
       if (!mounted) return;
@@ -132,7 +142,7 @@ class _SplashPageState extends State<SplashPage>
                           ],
                         ),
                         child: Image.asset(
-                          'assets/logos/troskit-logo.png',
+                          AppTheme.logoAsset,
                           width: 90,
                           height: 90,
                           fit: BoxFit.contain,

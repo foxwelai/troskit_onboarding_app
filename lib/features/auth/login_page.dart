@@ -72,7 +72,7 @@ class _LoginPageState extends State<LoginPage> {
                       children: [
                         Center(
                           child: Image.asset(
-                            'assets/logos/troskit-logo.png',
+                            AppTheme.logoAsset,
                             width: 168,
                             height: 168,
                             fit: BoxFit.contain,

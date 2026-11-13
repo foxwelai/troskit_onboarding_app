@@ -10,6 +10,10 @@ import 'package:go_router/go_router.dart';
 import '../../api.dart';
 import '../../core/services/ai_image_vault.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/image_compress_util.dart';
+import '../../core/widgets/image_adjust_sheet.dart';
+import '../../core/widgets/top_toast.dart';
+
 
 enum AiEnhanceFeature {
   removeBackground(
@@ -69,11 +73,32 @@ class AiEnhancerResult {
 }
 
 /// After capture/upload — optional AI tools.
+///
+/// Call [dismissPreparing] right before the sheet opens so any loading
+/// dialog stays up through warm-up and only closes as the sheet appears.
 Future<AiEnhancerResult> showAiEnhancerSheet({
   required BuildContext context,
   required File originalFile,
   String? remotePreviewUrl,
+  VoidCallback? dismissPreparing,
 }) async {
+  // Warm compressor + AI route before the sheet so the first tap is ready.
+  await Future.wait([
+    ImageCompressUtil.ensureAiReady(),
+    OnboardingApi.warmAiEnhance(),
+  ]);
+  if (!context.mounted) {
+    dismissPreparing?.call();
+    return AiEnhancerResult(file: originalFile, skipped: true);
+  }
+
+  // Drop loading overlay only now — immediately before the bottom sheet.
+  dismissPreparing?.call();
+  await Future<void>.delayed(Duration.zero);
+  if (!context.mounted) {
+    return AiEnhancerResult(file: originalFile, skipped: true);
+  }
+
   final action = await showModalBottomSheet<Object?>(
     context: context,
     backgroundColor: Colors.white,
@@ -105,8 +130,18 @@ Future<AiEnhancerResult> showAiEnhancerSheet({
                       width: 52,
                       height: 52,
                       child: remotePreviewUrl != null && remotePreviewUrl.isNotEmpty
-                          ? Image.network(remotePreviewUrl, fit: BoxFit.cover)
-                          : Image.file(originalFile, fit: BoxFit.cover),
+                          ? Image.network(
+                              remotePreviewUrl,
+                              fit: BoxFit.cover,
+                              cacheWidth: 104,
+                              cacheHeight: 104,
+                            )
+                          : Image.file(
+                              originalFile,
+                              fit: BoxFit.cover,
+                              cacheWidth: 104,
+                              cacheHeight: 104,
+                            ),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -162,14 +197,25 @@ Future<AiEnhancerResult> showAiEnhancerSheet({
                 trailing: const Icon(Icons.chevron_right_rounded, color: AppTheme.muted),
                 onTap: () => Navigator.pop(ctx, 'pick_vault'),
               ),
-              const SizedBox(height: 4),
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, null),
-                child: const Text(
-                  'Maybe later',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.muted,
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: AppTheme.line),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  onPressed: () => Navigator.pop(ctx, null),
+                  child: const Text(
+                    'Maybe later',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 15,
+                      color: AppTheme.muted,
+                    ),
                   ),
                 ),
               ),
@@ -189,8 +235,9 @@ Future<AiEnhancerResult> showAiEnhancerSheet({
     if (picked == null || !context.mounted) {
       return AiEnhancerResult(file: originalFile, skipped: true);
     }
+    final compressed = await ImageCompressUtil.compressProductImage(picked.file);
     return AiEnhancerResult(
-      file: picked.file,
+      file: compressed,
       usedAi: true,
       vaultImage: picked.entry,
     );
@@ -200,6 +247,7 @@ Future<AiEnhancerResult> showAiEnhancerSheet({
     context: context,
     originalFile: originalFile,
     feature: action as AiEnhanceFeature,
+    imageUrl: remotePreviewUrl,
   );
 }
 
@@ -210,15 +258,19 @@ class _VaultPick {
 }
 
 Future<_VaultPick?> _pickFromVaultImages(BuildContext context) async {
-  final items = await AiImageVault.list();
+  final items = await AiImageVault.listWithFiles();
   if (!context.mounted) return null;
 
   if (items.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('No previously generated AI images yet')),
+    TopToast.show(
+      context,
+      title: 'AI Gallery Empty',
+      message: 'No previously generated AI images yet.',
+      isError: false,
     );
     return null;
   }
+
 
   return showModalBottomSheet<_VaultPick>(
     context: context,
@@ -278,37 +330,37 @@ Future<_VaultPick?> _pickFromVaultImages(BuildContext context) async {
                   itemCount: items.length,
                   itemBuilder: (context, i) {
                     final entry = items[i];
-                    return FutureBuilder<File?>(
-                      future: AiImageVault.fileFor(entry),
-                      builder: (context, snap) {
-                        final file = snap.data;
-                        if (file == null) {
-                          return Container(
-                            decoration: BoxDecoration(
-                              color: AppTheme.canvas,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          );
-                        }
-                        return InkWell(
-                          onTap: () => Navigator.pop(
-                            ctx,
-                            _VaultPick(file: file, entry: entry),
-                          ),
-                          onLongPress: () => _openImageFullscreen(context, file),
+                    final file = entry.file;
+                    if (file == null) {
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: AppTheme.canvas,
                           borderRadius: BorderRadius.circular(12),
-                          child: Ink(
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: AppTheme.line),
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(11),
-                              child: Image.file(file, fit: BoxFit.cover),
-                            ),
+                        ),
+                      );
+                    }
+                    return InkWell(
+                      onTap: () => Navigator.pop(
+                        ctx,
+                        _VaultPick(file: file, entry: entry),
+                      ),
+                      onLongPress: () => _openImageFullscreen(context, file),
+                      borderRadius: BorderRadius.circular(12),
+                      child: Ink(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppTheme.line),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(11),
+                          child: Image.file(
+                            file,
+                            fit: BoxFit.cover,
+                            cacheWidth: 240,
+                            cacheHeight: 240,
                           ),
-                        );
-                      },
+                        ),
+                      ),
                     );
                   },
                 ),
@@ -321,6 +373,49 @@ Future<_VaultPick?> _pickFromVaultImages(BuildContext context) async {
   );
 }
 
+/// Prepare JPEG and call enhance. Always retries once — first camera enhance
+/// commonly fails once (cold compressor / Android temp-file race), then works.
+Future<Map<String, dynamic>> _enhanceWithPreparedRetry({
+  required File originalFile,
+  required String featureKey,
+}) async {
+  Object? lastError;
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      // Force a fresh warm on retry in case native compressor was half-ready.
+      if (attempt > 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+      }
+      await ImageCompressUtil.ensureAiReady();
+      final prepared =
+          await ImageCompressUtil.prepareForAiEnhance(originalFile);
+      // Ensure FS flush before upload on flaky Android storage.
+      await prepared.length();
+      return await OnboardingApi.enhanceProductImage(
+        file: prepared,
+        imageUrl: null,
+        featureKey: featureKey,
+      );
+    } catch (e) {
+      lastError = e;
+      final msg = e.toString().toLowerCase();
+      // Don't retry hard auth / billing / quota failures.
+      final fatal = msg.contains('api key has expired') ||
+          msg.contains('invalid api key') ||
+          msg.contains('incorrect api key') ||
+          msg.contains('401') ||
+          msg.contains('403') ||
+          msg.contains('quota') ||
+          msg.contains('billing') ||
+          msg.contains('too many') ||
+          msg.contains('429');
+      if (fatal || attempt > 0) rethrow;
+      debugPrint('[AiEnhance] first attempt failed, auto-retrying: $e');
+    }
+  }
+  throw lastError ?? Exception('AI enhance failed');
+}
+
 void _openImageFullscreen(BuildContext context, File file) {
   Navigator.of(context).push(
     MaterialPageRoute<void>(
@@ -329,6 +424,12 @@ void _openImageFullscreen(BuildContext context, File file) {
         appBar: AppBar(
           backgroundColor: Colors.black,
           foregroundColor: Colors.white,
+          iconTheme: const IconThemeData(color: Colors.white),
+          titleTextStyle: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w700,
+            fontSize: 16,
+          ),
           title: const Text('AI Image'),
         ),
         body: Center(
@@ -345,6 +446,7 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
   required BuildContext context,
   required File originalFile,
   required AiEnhanceFeature feature,
+  String? imageUrl,
 }) async {
   showDialog<void>(
     context: context,
@@ -355,16 +457,15 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
 
   Map<String, dynamic> result;
   try {
-    result = await OnboardingApi.enhanceProductImage(
-      file: originalFile,
+    // Camera cold-start: warm → verified JPEG → upload; one automatic retry.
+    result = await _enhanceWithPreparedRetry(
+      originalFile: originalFile,
       featureKey: feature.key,
     );
   } catch (e) {
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-      );
+      TopToast.showError(context, e);
     }
     return AiEnhancerResult(file: originalFile);
   }
@@ -374,8 +475,11 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
   final b64 = (result['image_base64'] ?? '').toString();
   if (b64.isEmpty) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('AI returned an empty image')),
+      TopToast.show(
+        context,
+        title: 'Oh no, something went wrong!',
+        message: 'AI returned an empty image. Please try again or contact Admin.',
+        isError: true,
       );
     }
     return AiEnhancerResult(file: originalFile);
@@ -386,12 +490,16 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
     bytes = base64Decode(b64);
   } catch (_) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to decode AI image')),
+      TopToast.show(
+        context,
+        title: 'Oh no, something went wrong!',
+        message: 'Failed to process AI image. Please try again.',
+        isError: true,
       );
     }
     return AiEnhancerResult(file: originalFile);
   }
+
 
   // Always keep AI output in the local vault (even if user picks Original).
   final vault = await AiImageVault.saveBytes(
@@ -399,10 +507,15 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
     featureKey: feature.key,
     featureLabel: feature.label,
   );
-  final aiFile = await AiImageVault.fileFor(vault) ??
+  var aiFile = await AiImageVault.fileFor(vault) ??
       await File(
         '${Directory.systemTemp.path}/troskit_ai_${vault.id}.png',
       ).writeAsBytes(bytes, flush: true);
+
+  // Cutouts / transparent AI output → pure white canvas (never black).
+  if (feature == AiEnhanceFeature.removeBackground) {
+    aiFile = await ImageCompressUtil.compositeOnPureWhite(aiFile);
+  }
 
   if (!context.mounted) {
     return AiEnhancerResult(file: originalFile, vaultImage: vault);
@@ -452,7 +565,12 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
                   Expanded(
                     child: _compareTile(
                       label: 'Original',
-                      child: Image.file(originalFile, fit: BoxFit.cover),
+                      child: Image.file(
+                        originalFile,
+                        fit: BoxFit.cover,
+                        cacheWidth: 480,
+                        cacheHeight: 480,
+                      ),
                       onTap: () => _openImageFullscreen(pageContext, originalFile),
                     ),
                   ),
@@ -460,7 +578,15 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
                   Expanded(
                     child: _compareTile(
                       label: 'AI result · tap to view',
-                      child: Image.file(aiFile, fit: BoxFit.cover),
+                      child: ColoredBox(
+                        color: Colors.white,
+                        child: Image.file(
+                          aiFile,
+                          fit: BoxFit.contain,
+                          cacheWidth: 480,
+                          cacheHeight: 480,
+                        ),
+                      ),
                       onTap: () => _openImageFullscreen(pageContext, aiFile),
                     ),
                   ),
@@ -504,6 +630,22 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
                   ),
                 ),
               ),
+              const SizedBox(height: 4),
+              Center(
+                child: TextButton.icon(
+                  onPressed: () => Navigator.pop(ctx, 'adjust'),
+                  icon: const Icon(Icons.crop_rotate_rounded, size: 16),
+                  label: const Text(
+                    'Crop & tilt AI image',
+                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppTheme.muted,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  ),
+                ),
+              ),
               TextButton(
                 onPressed: () => Navigator.pop(ctx, 'vault'),
                 child: const Text(
@@ -525,8 +667,25 @@ Future<AiEnhancerResult> _runEnhanceAndChoose({
     pageContext.push('/ai-images');
   }
 
+  if (choice == 'adjust' && pageContext.mounted) {
+    final adjusted = await showImageAdjustSheet(
+      context: pageContext,
+      file: aiFile,
+    );
+    if (adjusted != null) aiFile = adjusted;
+    if (!pageContext.mounted) {
+      return AiEnhancerResult(file: originalFile, vaultImage: vault);
+    }
+    // After adjust, treat as Use AI.
+    final compressed = await ImageCompressUtil.compressProductImage(aiFile);
+    return AiEnhancerResult(file: compressed, usedAi: true, vaultImage: vault);
+  }
+
   if (choice == 'ai') {
-    return AiEnhancerResult(file: aiFile, usedAi: true, vaultImage: vault);
+    // Always flatten onto pure white before catalog JPEG (esp. cutouts).
+    final flattened = await ImageCompressUtil.compositeOnPureWhite(aiFile);
+    final compressed = await ImageCompressUtil.compressProductImage(flattened);
+    return AiEnhancerResult(file: compressed, usedAi: true, vaultImage: vault);
   }
   return AiEnhancerResult(file: originalFile, vaultImage: vault);
 }

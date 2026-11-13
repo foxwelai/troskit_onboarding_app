@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import '../../api.dart';
-import '../../core/constants/api_constants.dart';
+import '../../core/services/maintenance_service.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/store_map_preview.dart';
 import '../../core/widgets/ui_kit.dart';
 
 class StoreDetailsPage extends StatefulWidget {
@@ -15,7 +15,6 @@ class StoreDetailsPage extends StatefulWidget {
 
 class _StoreDetailsPageState extends State<StoreDetailsPage> {
   late Future<Map<String, dynamic>> _futureShop;
-  bool _ecomBusy = false;
 
   @override
   void initState() {
@@ -24,64 +23,12 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
   }
 
   void _reload({bool forceRefresh = true}) {
+    if (forceRefresh) {
+      MaintenanceService.instance.checkStatus();
+    }
     setState(() {
       _futureShop = OnboardingApi.getShop(widget.shopUuid, forceRefresh: forceRefresh);
     });
-  }
-
-  Future<void> _requestEcom(Map<String, dynamic> shop) async {
-    setState(() => _ecomBusy = true);
-    try {
-      double? lat = (shop['latitude'] as num?)?.toDouble();
-      double? lng = (shop['longitude'] as num?)?.toDouble();
-      if (lat == null || lng == null) {
-        var permission = await Geolocator.checkPermission();
-        if (permission == LocationPermission.denied) {
-          permission = await Geolocator.requestPermission();
-        }
-        if (permission == LocationPermission.denied ||
-            permission == LocationPermission.deniedForever) {
-          throw Exception(
-            'Location permission is required to request ECOM listing. '
-            'Please grant device location permission to proceed.',
-          );
-        }
-        if (!await Geolocator.isLocationServiceEnabled()) {
-          throw Exception('Please turn on device location services to pin store location.');
-        }
-        final pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-          ),
-        );
-        lat = pos.latitude;
-        lng = pos.longitude;
-      }
-
-      final res = await OnboardingApi.requestEcom(
-        shopUuid: widget.shopUuid,
-        latitude: lat,
-        longitude: lng,
-      );
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(res['message']?.toString() ?? 'ECOM listing request submitted'),
-          backgroundColor: const Color(0xFF15803D),
-        ),
-      );
-      _reload();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-          backgroundColor: const Color(0xFFC2410C),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _ecomBusy = false);
-    }
   }
 
   Widget _infoRow(IconData icon, String label, String? value, {Color? iconColor}) {
@@ -237,21 +184,7 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                Image.asset(
-                  'assets/images/shop.png',
-                  height: 72,
-                  width: 72,
-                  fit: BoxFit.contain,
-                  errorBuilder: (context, error, stackTrace) => Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.storefront_rounded, size: 30, color: Colors.white),
-                  ),
-                ),
+                const Shop3DArtworkWidget(width: 72, height: 72),
               ],
             ),
           ),
@@ -303,20 +236,9 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
 
           final shop = snap.data ?? {};
           final ecomStatus = (shop['ecom_listing_status'] ?? 'none').toString().toLowerCase();
-          final lat = shop['latitude'];
-          final lng = shop['longitude'];
+          final lat = (shop['latitude'] as num?)?.toDouble();
+          final lng = (shop['longitude'] as num?)?.toDouble();
           final coords = (lat != null && lng != null) ? '$lat, $lng' : null;
-
-          // Build Google Maps Static Preview URL
-          String? mapUrl;
-          if (lat != null && lng != null) {
-            mapUrl =
-                'https://maps.googleapis.com/maps/api/staticmap?center=$lat,$lng&zoom=15&size=600x300&maptype=roadmap&markers=color:red%7C$lat,$lng&key=${ApiConstants.googleMapsApiKey}';
-          } else if (shop['shop_gps_address'] != null && shop['shop_gps_address'].toString().trim().isNotEmpty) {
-            final loc = Uri.encodeComponent('${shop['shop_gps_address']}, Ghana');
-            mapUrl =
-                'https://maps.googleapis.com/maps/api/staticmap?center=$loc&zoom=14&size=600x300&maptype=roadmap&markers=color:red%7C$loc&key=${ApiConstants.googleMapsApiKey}';
-          }
 
           return RefreshIndicator(
             color: AppTheme.primary,
@@ -324,11 +246,9 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
             child: ListView(
               padding: EdgeInsets.fromLTRB(16, 14, 16, bottomInset > 0 ? bottomInset + 32 : 40),
               children: [
-                // 1. Header Banner Store Card
                 _buildStoreHeader(shop),
                 const SizedBox(height: 16),
 
-                // 2. Business Details Card
                 SectionCard(
                   title: 'Owner & Contact Details',
                   subtitle: 'Registered contact information for this store.',
@@ -352,30 +272,13 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
                 ),
                 const SizedBox(height: 14),
 
-                // 3. Location & Google Map Card
                 SectionCard(
                   title: 'Location & GPS Address',
                   subtitle: 'Store physical location and GhanaPost GPS details.',
                   children: [
-                    if (mapUrl != null) ...[
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: Container(
-                          height: 160,
-                          width: double.infinity,
-                          decoration: BoxDecoration(
-                            color: AppTheme.canvas,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: AppTheme.line),
-                          ),
-                          child: Image.network(
-                            mapUrl,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) => _mapFallback(coords),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 14),
+                    if (lat != null && lng != null) ...[
+                      StoreMapPreview(latitude: lat, longitude: lng),
+                      const SizedBox(height: 6),
                     ],
                     _infoRow(
                       Icons.pin_drop_outlined,
@@ -399,7 +302,6 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
                 ),
                 const SizedBox(height: 14),
 
-                // 4. MoMo Payout Account Card
                 SectionCard(
                   title: 'Mobile Money Payout Account',
                   subtitle: 'Payout details for web and POS sales settlements.',
@@ -432,8 +334,7 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
                 ),
                 const SizedBox(height: 14),
 
-                // 5. ECOM Listing Card
-                _buildEcomSection(shop, ecomStatus),
+                _buildEcomSection(ecomStatus),
               ],
             ),
           );
@@ -442,7 +343,7 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
     );
   }
 
-  Widget _buildEcomSection(Map<String, dynamic> shop, String ecomStatus) {
+  Widget _buildEcomSection(String ecomStatus) {
     final isApproved = ecomStatus == 'approved';
     final isPending = ecomStatus == 'pending';
 
@@ -459,7 +360,7 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
 
     return SectionCard(
       title: 'Troskit ECOM — Website Listing',
-      subtitle: 'Publish store catalog for web buyers and online ordering.',
+      subtitle: 'Listing is requested automatically when the shop is created.',
       children: [
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -500,8 +401,8 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
                       isApproved
                           ? 'Store is active and listed on Troskit ECOM.'
                           : isPending
-                              ? 'Request submitted — awaiting admin review.'
-                              : 'Store is not yet listed on Troskit ECOM.',
+                              ? 'Request submitted at create — awaiting admin review.'
+                              : 'No ECOM listing request on file for this store.',
                       style: TextStyle(
                         fontSize: 11.5,
                         color: statusFg.withValues(alpha: 0.9),
@@ -515,45 +416,7 @@ class _StoreDetailsPageState extends State<StoreDetailsPage> {
             ],
           ),
         ),
-        const SizedBox(height: 16),
-        PrimaryButton(
-          label: isApproved
-              ? 'Re-request ECOM Listing'
-              : isPending
-                  ? 'Awaiting Admin Approval'
-                  : 'Request ECOM Listing',
-          loading: _ecomBusy,
-          icon: isApproved
-              ? Icons.sync_rounded
-              : isPending
-                  ? Icons.hourglass_top_rounded
-                  : Icons.rocket_launch_rounded,
-          onPressed: (_ecomBusy || isPending) ? null : () => _requestEcom(shop),
-        ),
       ],
-    );
-  }
-
-  Widget _mapFallback(String? coords) {
-    return Container(
-      color: const Color(0xFFF1F5F9),
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.map_rounded, color: AppTheme.muted, size: 36),
-            const SizedBox(height: 6),
-            Text(
-              coords ?? 'Location Map Window',
-              style: const TextStyle(
-                color: AppTheme.muted,
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

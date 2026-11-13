@@ -2,6 +2,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../theme/app_theme.dart';
+export 'shop_artwork.dart';
 
 class FieldLabel extends StatelessWidget {
   final String text;
@@ -163,7 +164,7 @@ class SectionCard extends StatelessWidget {
                   ],
                 ),
               ),
-              if (trailing != null) trailing!,
+              ?trailing,
             ],
           ),
           const SizedBox(height: 14),
@@ -1260,158 +1261,4 @@ class RedWaveSparklinePainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-/// 3D Shop Artwork Widget matching Shop Cards & Shop Banner
-class Shop3DArtworkWidget extends StatelessWidget {
-  final double width;
-  final double height;
-
-  const Shop3DArtworkWidget({
-    super.key,
-    this.width = 90,
-    this.height = 90,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Image.asset(
-      'assets/images/shop.png',
-      width: width,
-      height: height,
-      fit: BoxFit.contain,
-      errorBuilder: (context, err, stack) {
-        return Image.asset(
-          'assets/images/shop-banner.png',
-          width: width,
-          height: height,
-          fit: BoxFit.contain,
-          errorBuilder: (context, err2, stack2) {
-            return SizedBox(
-              width: width,
-              height: height,
-              child: CustomPaint(painter: _Shop3DPainter()),
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class _Shop3DPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-
-    // Ground shadow
-    final shadowPaint = Paint()
-      ..color = Colors.black.withValues(alpha: 0.08)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
-    canvas.drawOval(
-      Rect.fromLTWH(w * 0.08, h * 0.84, w * 0.84, h * 0.12),
-      shadowPaint,
-    );
-
-    // Main Wall (Front Face)
-    final frontWall = Path()
-      ..moveTo(w * 0.22, h * 0.42)
-      ..lineTo(w * 0.78, h * 0.42)
-      ..lineTo(w * 0.78, h * 0.84)
-      ..lineTo(w * 0.22, h * 0.84)
-      ..close();
-
-    final wallPaint = Paint()..color = const Color(0xFFFAF3EC);
-    canvas.drawPath(frontWall, wallPaint);
-
-    // Side Wall (3D Isometric Depth)
-    final sideWall = Path()
-      ..moveTo(w * 0.78, h * 0.42)
-      ..lineTo(w * 0.88, h * 0.35)
-      ..lineTo(w * 0.88, h * 0.76)
-      ..lineTo(w * 0.78, h * 0.84)
-      ..close();
-
-    final sideWallPaint = Paint()..color = const Color(0xFFD6C8B8);
-    canvas.drawPath(sideWall, sideWallPaint);
-
-    // Shop Wooden Sign "SHOP"
-    final signRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.32, h * 0.24, w * 0.36, h * 0.14),
-      const Radius.circular(5),
-    );
-    canvas.drawRRect(signRect, Paint()..color = const Color(0xFFE5A65E));
-    canvas.drawRRect(
-      signRect,
-      Paint()
-        ..color = const Color(0xFFB45309)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0,
-    );
-
-    // Awning Canopy (Red & Beige stripes)
-    final awningBg = Path()
-      ..moveTo(w * 0.16, h * 0.38)
-      ..lineTo(w * 0.84, h * 0.38)
-      ..lineTo(w * 0.88, h * 0.49)
-      ..lineTo(w * 0.12, h * 0.49)
-      ..close();
-    canvas.drawPath(awningBg, Paint()..color = const Color(0xFFE53935));
-
-    final stripePaint = Paint()..color = const Color(0xFFFFF1F2);
-    for (int i = 1; i < 7; i += 2) {
-      final stripe = Path()
-        ..moveTo(w * (0.16 + i * 0.095), h * 0.38)
-        ..lineTo(w * (0.16 + (i + 1) * 0.095), h * 0.38)
-        ..lineTo(w * (0.12 + (i + 1) * 0.105), h * 0.49)
-        ..lineTo(w * (0.12 + i * 0.105), h * 0.49)
-        ..close();
-      canvas.drawPath(stripe, stripePaint);
-    }
-
-    // Door Frame & Glass
-    final doorRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.45, h * 0.54, w * 0.22, h * 0.30),
-      const Radius.circular(3),
-    );
-    canvas.drawRRect(doorRect, Paint()..color = const Color(0xFF475569));
-    canvas.drawRRect(
-      doorRect,
-      Paint()
-        ..color = const Color(0xFF1E293B)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2,
-    );
-
-    // Door Handle
-    canvas.drawCircle(
-      Offset(w * 0.49, h * 0.68),
-      1.8,
-      Paint()..color = const Color(0xFFF59E0B),
-    );
-
-    // Window Frame & Glass
-    final winRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.26, h * 0.54, w * 0.15, h * 0.18),
-      const Radius.circular(3),
-    );
-    canvas.drawRRect(winRect, Paint()..color = const Color(0xFFBAE6FD));
-    canvas.drawRRect(
-      winRect,
-      Paint()
-        ..color = const Color(0xFF38BDF8)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0,
-    );
-
-    // Side Plant Pot
-    final potRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.17, h * 0.74, w * 0.09, h * 0.10),
-      const Radius.circular(2),
-    );
-    canvas.drawRRect(potRect, Paint()..color = const Color(0xFFD97706));
-    canvas.drawCircle(Offset(w * 0.21, h * 0.71), 4.0, Paint()..color = const Color(0xFF16A34A));
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
+// Shop3DArtworkWidget lives in shop_artwork.dart (decode-size optimized).

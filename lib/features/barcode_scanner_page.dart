@@ -5,9 +5,10 @@ import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../core/theme/app_theme.dart';
+import '../core/utils/barcode_validator.dart';
 import '../core/utils/sound_service.dart';
 
-/// Simple barcode / QR scanner — returns the scanned string via `context.pop`.
+/// Simple barcode scanner — returns the scanned product barcode via `context.pop`.
 class BarcodeScannerPage extends StatefulWidget {
   const BarcodeScannerPage({super.key});
 
@@ -22,12 +23,15 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
   );
   bool _done = false;
   Timer? _settle;
+  Timer? _warningTimer;
   String? _candidate;
+  String? _warningMessage;
   int _hits = 0;
 
   @override
   void dispose() {
     _settle?.cancel();
+    _warningTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
@@ -37,9 +41,28 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
     for (final barcode in capture.barcodes) {
       final value = (barcode.rawValue ?? barcode.displayValue)?.trim();
       if (value == null || value.length < 4) continue;
+
+      // Reject QR code links and invalid barcodes
+      if (BarcodeValidator.isUrlOrLink(value)) {
+        _showInvalidWarning('QR code web links cannot be used as barcodes');
+        continue;
+      }
+      if (!BarcodeValidator.isValid(value)) {
+        continue;
+      }
+
       if (RegExp(r'^\d+$').hasMatch(value) && value.length < 5) continue;
       _absorb(value);
     }
+  }
+
+  void _showInvalidWarning(String message) {
+    if (_warningMessage != null) return;
+    setState(() => _warningMessage = message);
+    _warningTimer?.cancel();
+    _warningTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _warningMessage = null);
+    });
   }
 
   void _absorb(String value) {
@@ -85,6 +108,51 @@ class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
               ),
             ),
           ),
+          if (_warningMessage != null)
+            Positioned(
+              top: 24,
+              left: 20,
+              right: 20,
+              child: SafeArea(
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD32F2F),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black45,
+                          blurRadius: 10,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          color: Colors.white,
+                          size: 24,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            _warningMessage!,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
           Positioned(
             left: 24,
             right: 24,

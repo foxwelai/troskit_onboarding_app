@@ -1,17 +1,29 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Remove unused audio recording permission from camera plugin (app only takes photos) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
     <!-- Save AI images to gallery (Android 9 and below) -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+        android:maxSdkVersion="29"
+        tools:replace="android:maxSdkVersion" />
+
+    <!-- Make camera and microphone hardware features optional so all devices are supported on Google Play -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" tools:replace="android:required" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" tools:replace="android:required" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" tools:replace="android:required" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" tools:replace="android:required" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" tools:replace="android:required" />
     <application
         android:label="Troskit Onboarding"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon"
+        android:largeHeap="true"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
@@ -44,6 +56,9 @@
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="barcode" />
         <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyD8KbABPpupXPjJ7OKr7cLep8BmkDFYW7A" />
+        <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
@@ -56,6 +71,14 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
         </intent>
     </queries>
 </manifest>

@@ -1,8 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../api.dart';
+import '../../core/services/maintenance_service.dart';
+import '../../core/services/recent_shops_store.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/ui_kit.dart';
+
 
 class ShopDetailPage extends StatefulWidget {
   final String shopUuid;
@@ -16,28 +21,61 @@ class _ShopDetailPageState extends State<ShopDetailPage> {
   late Future<Map<String, dynamic>> _shopFuture;
   late Future<List<dynamic>> _productsFuture;
   final _searchCtrl = TextEditingController();
-  String _searchQuery = '';
-  String _productStatusFilter = 'all'; // all | pending | approved | rejected
+  final ValueNotifier<String> _searchQuery = ValueNotifier('');
+
+  int? _totalProductCount;
 
   @override
   void initState() {
     super.initState();
     _shopFuture = OnboardingApi.getShop(widget.shopUuid);
-    _productsFuture = OnboardingApi.listProducts(widget.shopUuid);
+    _fetchProducts();
+    unawaited(_recordRecentOpen());
+  }
+
+  Future<void> _recordRecentOpen() async {
+    try {
+      final shop = await _shopFuture;
+      await RecentShopsStore.recordOpen(
+        shopUuid: widget.shopUuid,
+        shopName: shop['shop_name']?.toString(),
+        ownerName: shop['owner_name']?.toString(),
+        phoneNo: shop['phone_no']?.toString(),
+      );
+    } catch (_) {
+      await RecentShopsStore.recordOpen(shopUuid: widget.shopUuid);
+    }
+  }
+
+  void _fetchProducts({bool forceRefresh = false}) {
+    _productsFuture = OnboardingApi.listProducts(
+      widget.shopUuid,
+      forceRefresh: forceRefresh,
+    );
+    _productsFuture.then((list) {
+      if (mounted) {
+        setState(() => _totalProductCount = list.length);
+      }
+    }).catchError((_) {});
   }
 
   @override
   void dispose() {
     _searchCtrl.dispose();
+    _searchQuery.dispose();
     super.dispose();
   }
 
   void _reload({bool forceRefresh = true}) {
+    if (forceRefresh) {
+      MaintenanceService.instance.checkStatus();
+    }
     setState(() {
       _shopFuture = OnboardingApi.getShop(widget.shopUuid, forceRefresh: forceRefresh);
-      _productsFuture = OnboardingApi.listProducts(widget.shopUuid, forceRefresh: forceRefresh);
+      _fetchProducts(forceRefresh: forceRefresh);
     });
   }
+
 
   Future<void> _showAddProductBottomSheet() async {
     await showModalBottomSheet<void>(
@@ -273,7 +311,7 @@ class _ShopDetailPageState extends State<ShopDetailPage> {
     return Scaffold(
       backgroundColor: AppTheme.canvas,
       appBar: AppBar(
-        title: const Text('My Shops'),
+        title: const Text('Store Items'),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -283,184 +321,231 @@ class _ShopDetailPageState extends State<ShopDetailPage> {
         ],
       ),
       floatingActionButton: Padding(
-        padding: EdgeInsets.only(bottom: bottomInset > 0 ? 4 : 0),
-        child: FloatingActionButton(
-          heroTag: 'fab-products',
-          onPressed: _showAddProductBottomSheet,
-          child: const Icon(Icons.add_rounded, size: 28),
+        padding: EdgeInsets.only(
+          bottom: bottomInset > 0 ? bottomInset + 8 : 16,
+          right: 4,
         ),
+        child: (_totalProductCount == 0)
+            ? FloatingActionButton.extended(
+                heroTag: 'fab-products',
+                onPressed: _showAddProductBottomSheet,
+                backgroundColor: AppTheme.primary,
+                foregroundColor: Colors.white,
+                shape: const StadiumBorder(),
+                elevation: 4,
+                icon: const Icon(Icons.add_rounded, size: 22),
+                label: const Text(
+                  'Add First Product',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14.5,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              )
+            : FloatingActionButton(
+                heroTag: 'fab-products',
+                onPressed: _showAddProductBottomSheet,
+                backgroundColor: AppTheme.primary,
+                foregroundColor: Colors.white,
+                shape: const CircleBorder(),
+                elevation: 4,
+                child: const Icon(Icons.add_rounded, size: 28),
+              ),
       ),
       body: RefreshIndicator(
         color: AppTheme.primary,
         onRefresh: () async => _reload(),
-        child: ListView(
-          padding: EdgeInsets.fromLTRB(
-            16,
-            8,
-            16,
-            bottomInset > 0 ? bottomInset + 88 : 96,
-          ),
-          children: [
-            FutureBuilder<Map<String, dynamic>>(
-              future: _shopFuture,
-              builder: (context, snap) {
-                if (snap.connectionState != ConnectionState.done) {
-                  return const SkeletonCard(height: 150);
-                }
-                if (snap.hasError) {
-                  return EmptyState(
+        child: FutureBuilder<List<Object>>(
+          future: Future.wait<Object>([_shopFuture, _productsFuture]),
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return ListView(
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  8,
+                  16,
+                  bottomInset > 0 ? bottomInset + 88 : 96,
+                ),
+                children: const [
+                  SkeletonCard(height: 150),
+                  SizedBox(height: 12),
+                  SkeletonListLoader(count: 4, itemHeight: 80),
+                ],
+              );
+            }
+            if (snap.hasError) {
+              return ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  EmptyState(
                     icon: Icons.error_outline_rounded,
-                    title: 'Could not load store header',
+                    title: 'Could not load store',
                     subtitle: OnboardingApi.toUserMessage(snap.error),
-                  );
-                }
-                final shop = snap.data ?? {};
-                return FutureBuilder<List<dynamic>>(
-                  future: _productsFuture,
-                  builder: (context, pSnap) {
-                    final fromApi = int.tryParse(
-                      '${shop['product_count'] ?? shop['products_count'] ?? ''}',
-                    );
-                    final itemCount =
-                        pSnap.hasData ? pSnap.data!.length : (fromApi ?? 0);
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _buildShopBanner(shop, itemCount: itemCount),
-                        const SizedBox(height: 12),
-                        _buildStoreInfoEcomCard(shop),
-                      ],
-                    );
-                  },
-                );
-              },
-            ),
-            const SizedBox(height: 4),
-            SearchInputField(
-              hint: 'Search by Product Name',
-              controller: _searchCtrl,
-              onChanged: (q) =>
-                  setState(() => _searchQuery = q.trim().toLowerCase()),
-            ),
-            const SizedBox(height: 12),
-            FutureBuilder<List<dynamic>>(
-              future: _productsFuture,
-              builder: (context, snap) {
-                final items = snap.data ?? [];
-                final pendingCount = items
-                    .where((p) =>
-                        (p['verification_status'] ?? '')
-                            .toString()
-                            .toLowerCase() ==
-                        'pending')
-                    .length;
+                    action: ElevatedButton.icon(
+                      onPressed: _reload,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('Retry'),
+                    ),
+                  ),
+                ],
+              );
+            }
 
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          _buildFilterChip('all', 'All (${items.length})'),
-                          const SizedBox(width: 8),
-                          _buildFilterChip(
-                            'pending',
-                            'Pending ($pendingCount)',
+            final results = snap.data ?? const <Object>[];
+            final shop = results.isNotEmpty
+                ? Map<String, dynamic>.from(results[0] as Map)
+                : <String, dynamic>{};
+            final items = results.length > 1
+                ? List<dynamic>.from(results[1] as List)
+                : <dynamic>[];
+
+            if (_totalProductCount != items.length) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _totalProductCount != items.length) {
+                  setState(() => _totalProductCount = items.length);
+                }
+              });
+            }
+
+            final fromApi = int.tryParse(
+              '${shop['product_count'] ?? shop['products_count'] ?? ''}',
+            );
+            final itemCount =
+                items.isNotEmpty ? items.length : (fromApi ?? 0);
+            return ValueListenableBuilder<String>(
+              valueListenable: _searchQuery,
+              builder: (context, query, _) {
+                final filtered = items.where((raw) {
+                  final p = raw as Map<String, dynamic>;
+                  if (query.isEmpty) return true;
+                  final name =
+                      (p['item_name'] ?? '').toString().toLowerCase();
+                  final brand =
+                      (p['brand_name'] ?? p['product_brand'] ?? '')
+                          .toString()
+                          .toLowerCase();
+                  final barcode =
+                      (p['barcode']?.toString() ?? '').toLowerCase();
+                  return name.contains(query) ||
+                      brand.contains(query) ||
+                      barcode.contains(query);
+                }).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+
+                String statusOf(Map<String, dynamic> p) =>
+                    (p['verification_status'] ?? 'pending')
+                        .toString()
+                        .toLowerCase();
+
+                final approved = filtered
+                    .where((p) => statusOf(p) == 'approved')
+                    .toList();
+                final pending = filtered
+                    .where((p) => statusOf(p) == 'pending')
+                    .toList();
+                final rejected = filtered
+                    .where((p) => statusOf(p) == 'rejected')
+                    .toList();
+
+                return CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  slivers: [
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                      sliver: SliverList(
+                        delegate: SliverChildListDelegate([
+                          _buildShopBanner(shop, itemCount: itemCount),
+                          const SizedBox(height: 12),
+                          _buildStoreInfoEcomCard(shop),
+                          const SizedBox(height: 12),
+                          SearchInputField(
+                            hint: 'Search by Product Name',
+                            controller: _searchCtrl,
+                            onChanged: (q) =>
+                                _searchQuery.value = q.trim().toLowerCase(),
                           ),
-                          const SizedBox(width: 8),
-                          _buildFilterChip('processing', 'Processing'),
-                          const SizedBox(width: 8),
-                          _buildFilterChip('shipped', 'Shipped'),
-                          const SizedBox(width: 8),
-                          _buildFilterChip('delivered', 'Delivered'),
-                        ],
+                          const SizedBox(height: 8),
+                        ]),
                       ),
                     ),
-                    const SizedBox(height: 14),
-                    if (snap.connectionState != ConnectionState.done)
-                      const SkeletonListLoader(count: 4, itemHeight: 80)
-                    else if (snap.hasError)
-                      EmptyState(
-                        icon: Icons.error_outline_rounded,
-                        title: 'Could not load products',
-                        subtitle: OnboardingApi.toUserMessage(snap.error),
-                        action: ElevatedButton.icon(
-                          onPressed: _reload,
-                          icon: const Icon(Icons.refresh_rounded),
-                          label: const Text('Retry'),
+                    if (items.isEmpty)
+                      const SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: EmptyState(
+                          icon: Icons.inventory_2_outlined,
+                          title: "Catalog this shop's products",
+                          subtitle:
+                              'Assigned shops start empty. Add barcoded or non-barcoded items so POS / ECOM can sell them.',
                         ),
                       )
-                    else ...[
-                      Builder(
-                        builder: (context) {
-                          final filtered = items.where((raw) {
-                            final p = raw as Map<String, dynamic>;
-                            final status = (p['verification_status'] ?? 'pending')
-                                .toString()
-                                .toLowerCase();
-                            if (_productStatusFilter != 'all' &&
-                                status != _productStatusFilter) {
-                              return false;
-                            }
-                            if (_searchQuery.isEmpty) return true;
-                            final name =
-                                (p['item_name'] ?? '').toString().toLowerCase();
-                            final brand =
-                                (p['brand_name'] ?? p['product_brand'] ?? '')
-                                    .toString()
-                                    .toLowerCase();
-                            final barcode =
-                                (p['barcode']?.toString() ?? '').toLowerCase();
-                            return name.contains(_searchQuery) ||
-                                brand.contains(_searchQuery) ||
-                                barcode.contains(_searchQuery);
-                          }).toList();
-
-                          if (items.isEmpty) {
-                            return EmptyState(
-                              icon: Icons.inventory_2_outlined,
-                              title: "Catalog this shop's products",
-                              subtitle:
-                                  'Assigned shops start empty. Add barcoded or non-barcoded items so POS / ECOM can sell them.',
-                              action: PrimaryButton(
-                                label: 'Add First Product',
-                                icon: Icons.add_rounded,
-                                onPressed: _showAddProductBottomSheet,
-                              ),
-                            );
-                          }
-
-                          if (filtered.isEmpty) {
-                            return const EmptyState(
-                              icon: Icons.search_off_rounded,
-                              title: 'No matching items',
-                              subtitle:
-                                  'No product matches the selected filter & search.',
-                            );
-                          }
-
-                          return Column(
-                            children: [
-                              for (final raw in filtered) ...[
-                                _buildProductCard(
-                                  raw as Map<String, dynamic>,
-                                ),
-                                const SizedBox(height: 10),
-                              ],
-                            ],
-                          );
-                        },
+                    else if (filtered.isEmpty)
+                      const SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: EmptyState(
+                          icon: Icons.search_off_rounded,
+                          title: 'No matching items',
+                          subtitle: 'Try another product name or barcode.',
+                        ),
+                      )
+                    else
+                      SliverPadding(
+                        padding: EdgeInsets.fromLTRB(
+                          16,
+                          0,
+                          16,
+                          bottomInset > 0 ? bottomInset + 88 : 96,
+                        ),
+                        sliver: SliverList(
+                          delegate: SliverChildListDelegate([
+                            ..._productSection(
+                              title: 'Approved',
+                              products: approved,
+                            ),
+                            ..._productSection(
+                              title: 'Pending',
+                              products: pending,
+                            ),
+                            ..._productSection(
+                              title: 'Rejected',
+                              products: rejected,
+                            ),
+                          ]),
+                        ),
                       ),
-                    ],
                   ],
                 );
               },
-            ),
-          ],
+            );
+          },
         ),
       ),
     );
+  }
+
+  List<Widget> _productSection({
+    required String title,
+    required List<Map<String, dynamic>> products,
+  }) {
+    if (products.isEmpty) return const [];
+    return [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(2, 14, 2, 10),
+        child: Text(
+          '$title (${products.length})',
+          style: const TextStyle(
+            fontSize: 15.5,
+            fontWeight: FontWeight.w800,
+            color: AppTheme.ink,
+            letterSpacing: -0.2,
+          ),
+        ),
+      ),
+      for (var i = 0; i < products.length; i++) ...[
+        _buildProductCard(products[i]),
+        if (i < products.length - 1) const SizedBox(height: 10),
+      ],
+      const SizedBox(height: 4),
+    ];
   }
 
   Widget _buildShopBanner(Map<String, dynamic> shop, {required int itemCount}) {
@@ -544,43 +629,8 @@ class _ShopDetailPageState extends State<ShopDetailPage> {
               ),
             ),
             const SizedBox(width: 12),
-            Image.asset(
-              'assets/images/shop.png',
-              width: 86,
-              height: 86,
-              fit: BoxFit.contain,
-              errorBuilder: (ctx, err, stack) => const Shop3DArtworkWidget(width: 86, height: 86),
-            ),
+            const Shop3DArtworkWidget(width: 86, height: 86),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFilterChip(String key, String label) {
-    final selected = _productStatusFilter == key;
-    return Material(
-      color: selected ? AppTheme.primary : Colors.white,
-      borderRadius: BorderRadius.circular(999),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(999),
-        onTap: () => setState(() => _productStatusFilter = key),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color: selected ? AppTheme.primary : AppTheme.line,
-            ),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-              color: selected ? Colors.white : AppTheme.ink,
-            ),
-          ),
         ),
       ),
     );
@@ -636,6 +686,8 @@ class _ShopDetailPageState extends State<ShopDetailPage> {
                         image,
                         width: 58,
                         height: 58,
+                        cacheWidth: 120,
+                        cacheHeight: 120,
                         fit: BoxFit.cover,
                         errorBuilder: (_, _, _) => _fallbackImage(),
                       )

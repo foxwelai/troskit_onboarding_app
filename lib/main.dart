@@ -7,16 +7,22 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'core/theme/app_theme.dart';
+import 'core/constants/api_constants.dart';
+import 'core/services/maintenance_service.dart';
 import 'features/auth/blocked_access_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/auth/splash_page.dart';
-import 'features/barcode_scanner_page.dart';
+import 'features/maintenance/maintenance_page.dart';
 import 'features/home/home_page.dart';
-import 'features/products/add_product_page.dart';
-import 'features/products/ai_images_page.dart';
-import 'features/shops/onboard_shop_page.dart';
-import 'features/shops/shop_detail_page.dart';
-import 'features/shops/store_details_page.dart';
+
+// Heavy routes — deferred so camera/scanner/AI/shop editors aren't pulled into
+// the initial isolate startup graph.
+import 'features/barcode_scanner_page.dart' deferred as scanner;
+import 'features/products/add_product_page.dart' deferred as add_product;
+import 'features/products/ai_images_page.dart' deferred as ai_images;
+import 'features/shops/onboard_shop_page.dart' deferred as onboard_shop;
+import 'features/shops/shop_detail_page.dart' deferred as shop_detail;
+import 'features/shops/store_details_page.dart' deferred as store_details;
 
 Future<void> main() async {
   await runZonedGuarded(() async {
@@ -34,6 +40,10 @@ Future<void> main() async {
     // Bundled under google_fonts/ — avoid release crashes when offline.
     GoogleFonts.config.allowRuntimeFetching = false;
     SystemChrome.setSystemUIOverlayStyle(AppTheme.systemUi);
+
+    await ApiConstants.init();
+    MaintenanceService.instance.startMonitoring();
+
     runApp(const TroskitOnboardingApp());
   }, (error, stack) {
     debugPrint('[ZoneError] $error\n$stack');
@@ -42,13 +52,62 @@ Future<void> main() async {
 
 final _rootNavigatorKey = GlobalKey<NavigatorState>();
 
+/// Cache deferred-library futures so rebuilds don't re-call [loadLibrary].
+final Map<Object, Future<void>> _deferredFutures = {};
+
+Widget _deferred(Future<void> Function() load, Widget Function() builder) {
+  final future = _deferredFutures.putIfAbsent(load, load);
+  return FutureBuilder<void>(
+    future: future,
+    builder: (context, snap) {
+      if (snap.connectionState != ConnectionState.done) {
+        return const Scaffold(
+          backgroundColor: Colors.white,
+          body: Center(
+            child: SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(strokeWidth: 2.4),
+            ),
+          ),
+        );
+      }
+      if (snap.hasError) {
+        return Scaffold(
+          body: Center(child: Text('Failed to load screen: ${snap.error}')),
+        );
+      }
+      return builder();
+    },
+  );
+}
+
 final _router = GoRouter(
   navigatorKey: _rootNavigatorKey,
   initialLocation: '/splash',
+  refreshListenable: MaintenanceService.instance,
+  redirect: (context, state) {
+    final isMaint = MaintenanceService.instance.isMaintenance;
+    final atMaint = state.matchedLocation == '/maintenance';
+
+    if (isMaint) {
+      return atMaint ? null : '/maintenance';
+    }
+
+    if (atMaint) {
+      return '/splash';
+    }
+
+    return null;
+  },
   routes: [
     GoRoute(
       path: '/splash',
       builder: (context, state) => const SplashPage(),
+    ),
+    GoRoute(
+      path: '/maintenance',
+      builder: (context, state) => const MaintenancePage(),
     ),
     GoRoute(
       path: '/login',
@@ -66,44 +125,65 @@ final _router = GoRouter(
     ),
     GoRoute(
       path: '/ai-images',
-      builder: (context, state) => const AiImagesPage(),
+      builder: (context, state) => _deferred(
+        ai_images.loadLibrary,
+        () => ai_images.AiImagesPage(),
+      ),
     ),
     GoRoute(
       path: '/shops/new',
-      builder: (context, state) => const OnboardShopPage(),
+      builder: (context, state) => _deferred(
+        onboard_shop.loadLibrary,
+        () => onboard_shop.OnboardShopPage(),
+      ),
     ),
     GoRoute(
       path: '/scanner',
-      builder: (context, state) => const BarcodeScannerPage(),
+      builder: (context, state) => _deferred(
+        scanner.loadLibrary,
+        () => scanner.BarcodeScannerPage(),
+      ),
     ),
     GoRoute(
       path: '/shops/:uuid',
-      builder: (context, state) => ShopDetailPage(
-        shopUuid: state.pathParameters['uuid']!,
+      builder: (context, state) => _deferred(
+        shop_detail.loadLibrary,
+        () => shop_detail.ShopDetailPage(
+          shopUuid: state.pathParameters['uuid']!,
+        ),
       ),
       routes: [
         GoRoute(
           path: 'store-details',
           parentNavigatorKey: _rootNavigatorKey,
-          builder: (context, state) => StoreDetailsPage(
-            shopUuid: state.pathParameters['uuid']!,
+          builder: (context, state) => _deferred(
+            store_details.loadLibrary,
+            () => store_details.StoreDetailsPage(
+              shopUuid: state.pathParameters['uuid']!,
+            ),
           ),
         ),
         GoRoute(
           path: 'products/new',
           parentNavigatorKey: _rootNavigatorKey,
-          builder: (context, state) => AddProductPage(
-            shopUuid: state.pathParameters['uuid']!,
-            hasBarcode: state.uri.queryParameters['hasBarcode'] != 'false',
+          builder: (context, state) => _deferred(
+            add_product.loadLibrary,
+            () => add_product.AddProductPage(
+              shopUuid: state.pathParameters['uuid']!,
+              hasBarcode: state.uri.queryParameters['hasBarcode'] != 'false',
+            ),
           ),
         ),
         GoRoute(
           path: 'products/:productUuid/edit',
           parentNavigatorKey: _rootNavigatorKey,
-          builder: (context, state) => AddProductPage(
-            shopUuid: state.pathParameters['uuid']!,
-            productUuid: state.pathParameters['productUuid'],
-            hasBarcode: state.uri.queryParameters['hasBarcode'] != 'false',
+          builder: (context, state) => _deferred(
+            add_product.loadLibrary,
+            () => add_product.AddProductPage(
+              shopUuid: state.pathParameters['uuid']!,
+              productUuid: state.pathParameters['productUuid'],
+              hasBarcode: state.uri.queryParameters['hasBarcode'] != 'false',
+            ),
           ),
         ),
       ],

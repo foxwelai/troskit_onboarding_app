@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,8 +9,15 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../api.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/barcode_validator.dart';
+import '../../core/utils/image_compress_util.dart';
+import '../../core/widgets/image_adjust_sheet.dart';
+import '../../core/widgets/top_toast.dart';
 import '../../core/widgets/ui_kit.dart';
 import 'ai_enhancer_sheets.dart';
+import 'product_camera_page.dart';
+import 'product_draft_store.dart';
+
 
 class _ProductColorOpt {
   String name;
@@ -98,6 +107,7 @@ class _AddProductPageState extends State<AddProductPage> {
   String? _error;
   String? _catalogHint;
   bool _lookingUp = false;
+  Timer? _draftDebounce;
 
   bool get _isEdit =>
       widget.productUuid != null && widget.productUuid!.isNotEmpty;
@@ -118,11 +128,29 @@ class _AddProductPageState extends State<AddProductPage> {
     if (_isEdit) {
       _loadingProduct = true;
     }
+    _name.addListener(_onFieldChanged);
+    _barcode.addListener(_onFieldChanged);
+    _avgPrice.addListener(_onFieldChanged);
+    _shopPrice.addListener(_onFieldChanged);
+    _stock.addListener(_onFieldChanged);
+    _description.addListener(_onFieldChanged);
+    _product.addListener(_onFieldChanged);
+    // Warm native compressor + AI API before first camera enhance.
+    unawaited(ImageCompressUtil.ensureAiReady());
+    unawaited(OnboardingApi.warmAiEnhance());
     _bootstrap();
   }
 
   @override
   void dispose() {
+    _draftDebounce?.cancel();
+    _name.removeListener(_onFieldChanged);
+    _barcode.removeListener(_onFieldChanged);
+    _avgPrice.removeListener(_onFieldChanged);
+    _shopPrice.removeListener(_onFieldChanged);
+    _stock.removeListener(_onFieldChanged);
+    _description.removeListener(_onFieldChanged);
+    _product.removeListener(_onFieldChanged);
     _product.dispose();
     _name.dispose();
     _description.dispose();
@@ -131,6 +159,102 @@ class _AddProductPageState extends State<AddProductPage> {
     _shopPrice.dispose();
     _stock.dispose();
     super.dispose();
+  }
+
+  void _onFieldChanged() {
+    // Debounce disk writes — typing used to jsonEncode + SharedPreferences
+    // on every keystroke.
+    _draftDebounce?.cancel();
+    _draftDebounce = Timer(const Duration(milliseconds: 400), () {
+      unawaited(_saveDraft());
+    });
+  }
+
+  Future<void> _saveDraft() async {
+    if (_isEdit) return;
+    await ProductDraftStore.save(widget.shopUuid, {
+      'name': _name.text,
+      'product': _product.text,
+      'barcode': _barcode.text,
+      'hasBarcode': _hasBarcode,
+      'avgPrice': _avgPrice.text,
+      'shopPrice': _shopPrice.text,
+      'stock': _stock.text,
+      'description': _description.text,
+      'categoryUuid': _categoryUuid,
+      'taxStatus': _taxStatus,
+      'pricingType': _pricingType,
+      'imagePaths': _newImages.map((f) => f.path).toList(),
+      'photoColorNames':
+          _photoColorNames.map((k, v) => MapEntry(k.toString(), v)),
+      'colors': _colors.map((c) => c.toJson()).toList(),
+    });
+  }
+
+  Future<void> _restoreDraft() async {
+    if (_isEdit) return;
+    try {
+      final map = await ProductDraftStore.load(widget.shopUuid);
+      if (map == null) return;
+
+      if (!mounted) return;
+      setState(() {
+        if (_name.text.isEmpty && map['name'] != null) _name.text = map['name'].toString();
+        if (_product.text.isEmpty && map['product'] != null) _product.text = map['product'].toString();
+        if (_barcode.text.isEmpty && map['barcode'] != null) _barcode.text = map['barcode'].toString();
+        if (_avgPrice.text.isEmpty && map['avgPrice'] != null) _avgPrice.text = map['avgPrice'].toString();
+        if (_shopPrice.text.isEmpty && map['shopPrice'] != null) _shopPrice.text = map['shopPrice'].toString();
+        if (_stock.text.isEmpty && map['stock'] != null) _stock.text = map['stock'].toString();
+        if (_description.text.isEmpty && map['description'] != null) _description.text = map['description'].toString();
+        if (_categoryUuid == null && map['categoryUuid'] != null) _categoryUuid = map['categoryUuid'].toString();
+        if (map['taxStatus'] != null) _taxStatus = map['taxStatus'].toString();
+        if (map['pricingType'] != null) _pricingType = map['pricingType'].toString();
+
+        if (_newImages.isEmpty && map['imagePaths'] is List) {
+          for (final p in map['imagePaths']) {
+            final f = File(p.toString());
+            if (f.existsSync()) {
+              _newImages.add(f);
+            }
+          }
+        }
+        if (_photoColorNames.isEmpty && map['photoColorNames'] is Map) {
+          (map['photoColorNames'] as Map).forEach((k, v) {
+            final idx = int.tryParse(k.toString());
+            if (idx != null) _photoColorNames[idx] = v.toString();
+          });
+        }
+        if (_colors.isEmpty && map['colors'] is List) {
+          _colors.addAll(_parseColors(map['colors']));
+        }
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _clearDraft() async {
+    await ProductDraftStore.clear(widget.shopUuid);
+  }
+
+  Future<void> _recoverLostData() async {
+    try {
+      final response = await ImagePicker().retrieveLostData();
+      if (response.isEmpty) return;
+      final files = response.files;
+      if (files != null && files.isNotEmpty && mounted) {
+        for (final x in files) {
+          final compressed = await ImageCompressUtil.compressProductImage(File(x.path));
+          if (!mounted) return;
+          setState(() {
+            _newImages.add(compressed);
+          });
+          final photoIndex = _existingImageUrls.length + _newImages.length - 1;
+          await _promptColorForPhoto(photoIndex: photoIndex, localFile: compressed);
+        }
+        _saveDraft();
+      }
+    } catch (e) {
+      debugPrint('[AddProductPage] retrieveLostData error: $e');
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -154,6 +278,8 @@ class _AddProductPageState extends State<AddProductPage> {
       }
     } else {
       await _loadCategories();
+      await _restoreDraft();
+      await _recoverLostData();
     }
   }
 
@@ -360,6 +486,15 @@ class _AddProductPageState extends State<AddProductPage> {
   }
 
   Future<void> _applyCatalogLookup(String code) async {
+    final validationError = BarcodeValidator.validate(code);
+    if (validationError != null) {
+      setState(() {
+        _lookingUp = false;
+        _catalogHint = validationError;
+      });
+      return;
+    }
+
     setState(() {
       _lookingUp = true;
       _catalogHint = 'Searching barcode in Troskit catalog…';
@@ -473,48 +608,291 @@ class _AddProductPageState extends State<AddProductPage> {
   Future<void> _scanBarcode() async {
     final code = await context.push<String>('/scanner');
     if (code != null && code.isNotEmpty && mounted) {
+      final validationError = BarcodeValidator.validate(code);
+      if (validationError != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(validationError),
+            backgroundColor: Colors.red.shade700,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
       setState(() => _barcode.text = code);
       await _applyCatalogLookup(code);
     }
   }
 
-  Future<void> _pickImage(ImageSource source) async {
-    final List<XFile> pickedFiles = [];
-    if (source == ImageSource.gallery) {
+  void _showLoadingIndicator(String message) {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (_) => PopScope(
+        canPop: false,
+        child: Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 48),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 26),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.14),
+                  blurRadius: 28,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 58,
+                  height: 58,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF8B5CF6), AppTheme.primary],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(18),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppTheme.primary.withValues(alpha: 0.35),
+                        blurRadius: 14,
+                        offset: const Offset(0, 5),
+                      ),
+                    ],
+                  ),
+                  child: const Center(
+                    child: Icon(
+                      Icons.auto_awesome_rounded,
+                      color: Colors.white,
+                      size: 28,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.ink,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Preparing photo for AI studio…',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: AppTheme.muted,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: const SizedBox(
+                    width: 140,
+                    height: 4,
+                    child: LinearProgressIndicator(
+                      backgroundColor: Color(0xFFF1F5F9),
+                      color: AppTheme.primary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _processAddedFile(File file) async {
+    _showLoadingIndicator('Preparing photo…');
+    // Same warm-up + JPEG pipeline used for existing server photos.
+    // Keep the loading dialog up until the AI sheet is about to open.
+    File newFile;
+    try {
+      await ImageCompressUtil.ensureAiReady();
+      newFile = await ImageCompressUtil.prepareForAiEnhance(file);
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!mounted) return;
+      TopToast.showError(context, e);
+      return;
+    }
+    if (!mounted) return;
+    final ai = await showAiEnhancerSheet(
+      context: context,
+      originalFile: newFile,
+      dismissPreparing: () {
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      },
+    );
+    newFile = await ImageCompressUtil.compressProductImage(ai.file);
+    if (!mounted) return;
+    setState(() {
+      _newImages.add(newFile);
+    });
+    final photoIndex = _existingImageUrls.length + _newImages.length - 1;
+    await _promptColorForPhoto(photoIndex: photoIndex, localFile: newFile);
+    _saveDraft();
+  }
+
+  Future<void> _openInAppCamera() async {
+    final result = await Navigator.push<dynamic>(
+      context,
+      MaterialPageRoute(builder: (_) => const ProductCameraPage()),
+    );
+
+    if (!mounted || result == null) return;
+
+    if (result is File) {
+      await _processAddedFile(result);
+    } else if (result == 'FALLBACK_SYSTEM_CAMERA') {
+      await _pickSystemCamera();
+    }
+  }
+
+  Future<void> _pickSystemCamera() async {
+    try {
+    final x = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 85,
+        requestFullMetadata: false,
+      );
+      if (x != null && mounted) {
+        var file = File(x.path);
+        file = await ImageCompressUtil.cropToSquare(file);
+        await _processAddedFile(file);
+      }
+    } catch (e) {
+      debugPrint('[AddProductPage] System camera pick error: $e');
+    }
+  }
+
+  Future<void> _pickGallery() async {
+    try {
       final xs = await ImagePicker().pickMultiImage(
-        maxWidth: 1280,
-        maxHeight: 1280,
-        imageQuality: 75,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 85,
       );
       if (xs.isEmpty) return;
-      pickedFiles.addAll(xs);
+      for (final x in xs) {
+        if (!mounted) return;
+        await _processAddedFile(File(x.path));
+      }
+    } catch (e) {
+      debugPrint('[AddProductPage] Gallery pick error: $e');
+    }
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
+    if (source == ImageSource.camera) {
+      await _openInAppCamera();
     } else {
-      final x = await ImagePicker().pickImage(
-        source: source,
-        maxWidth: 1280,
-        maxHeight: 1280,
-        imageQuality: 75,
-      );
-      if (x != null) pickedFiles.add(x);
+      await _pickGallery();
+    }
+  }
+
+  void _openPhotoFullscreen({File? file, String? url}) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            foregroundColor: Colors.white,
+            iconTheme: const IconThemeData(color: Colors.white),
+            titleTextStyle: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 16,
+            ),
+            title: const Text('Photo'),
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              minScale: 0.8,
+              maxScale: 5,
+              child: file != null
+                  ? Image.file(file, fit: BoxFit.contain)
+                  : (url != null && url.isNotEmpty
+                      ? Image.network(url, fit: BoxFit.contain)
+                      : const SizedBox.shrink()),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editGalleryPhoto(int photoIndex) async {
+    final isExisting = photoIndex < _existingImageUrls.length;
+    late File sourceFile;
+
+    try {
+      if (isExisting) {
+        sourceFile = await OnboardingApi.downloadImageToTemp(
+          _existingImageUrls[photoIndex],
+        );
+      } else {
+        sourceFile = _newImages[photoIndex - _existingImageUrls.length];
+      }
+    } catch (e) {
+      if (!mounted) return;
+      TopToast.showError(context, e);
+      return;
     }
 
-    if (pickedFiles.isEmpty) return;
+    if (!mounted) return;
+    final adjusted = await showImageAdjustSheet(
+      context: context,
+      file: sourceFile,
+    );
+    if (adjusted == null || !mounted) return;
+    final ready = await ImageCompressUtil.compressProductImage(adjusted);
+    if (!mounted) return;
 
-    for (final x in pickedFiles) {
-      var newFile = File(x.path);
-      if (!mounted) return;
-      final ai = await showAiEnhancerSheet(
-        context: context,
-        originalFile: newFile,
-      );
-      newFile = ai.file;
-      if (!mounted) return;
+    if (isExisting) {
       setState(() {
-        _newImages.add(newFile);
+        final colorName = _photoColorNames.remove(photoIndex);
+        _existingImageUrls.removeAt(photoIndex);
+        final shifted = <int, String>{};
+        _photoColorNames.forEach((k, v) {
+          if (k < photoIndex) {
+            shifted[k] = v;
+          } else if (k > photoIndex) {
+            shifted[k - 1] = v;
+          }
+        });
+        _photoColorNames
+          ..clear()
+          ..addAll(shifted);
+        _newImages.add(ready);
+        final newIndex = _existingImageUrls.length + _newImages.length - 1;
+        if (colorName != null) _photoColorNames[newIndex] = colorName;
       });
-      final photoIndex = _existingImageUrls.length + _newImages.length - 1;
-      await _promptColorForPhoto(photoIndex: photoIndex, localFile: newFile);
+    } else {
+      final localIdx = photoIndex - _existingImageUrls.length;
+      setState(() => _newImages[localIdx] = ready);
     }
+    _saveDraft();
   }
 
   /// AI Enhancer from an existing gallery thumb (edit later).
@@ -523,32 +901,44 @@ class _AddProductPageState extends State<AddProductPage> {
     late File sourceFile;
     String? remoteUrl;
 
-    if (isExisting) {
-      remoteUrl = _existingImageUrls[photoIndex];
-      try {
+    _showLoadingIndicator('Opening AI Enhancer…');
+
+    try {
+      // Mirror camera path: download (if needed) → warm AI compressor → JPEG.
+      // Keep loading until the AI sheet is about to open.
+      await ImageCompressUtil.ensureAiReady();
+      if (isExisting) {
+        remoteUrl = _existingImageUrls[photoIndex];
         sourceFile = await OnboardingApi.downloadImageToTemp(remoteUrl);
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-        );
-        return;
+      } else {
+        sourceFile = _newImages[photoIndex - _existingImageUrls.length];
       }
-    } else {
-      sourceFile = _newImages[photoIndex - _existingImageUrls.length];
+      sourceFile = await ImageCompressUtil.prepareForAiEnhance(sourceFile);
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (!mounted) return;
+      TopToast.showError(context, e);
+      return;
     }
 
     if (!mounted) return;
+
     final result = await showAiEnhancerSheet(
       context: context,
       originalFile: sourceFile,
       remotePreviewUrl: remoteUrl,
+      dismissPreparing: () {
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      },
     );
     if (!mounted) return;
+
 
     // Existing remote: only swap when user picked the AI image.
     if (isExisting) {
       if (!result.usedAi) return;
+      final readyFile = await ImageCompressUtil.compressProductImage(result.file);
+      if (!mounted) return;
       setState(() {
         final colorName = _photoColorNames.remove(photoIndex);
         _existingImageUrls.removeAt(photoIndex);
@@ -558,26 +948,28 @@ class _AddProductPageState extends State<AddProductPage> {
           if (k < photoIndex) {
             shifted[k] = v;
           } else if (k > photoIndex) {
-            // existing after removal: index - 1; new images later shift by -1 then +1 at end → net 0 for new?
-            // After removeAt, indices above photoIndex decrease by 1.
             shifted[k - 1] = v;
           }
         });
         _photoColorNames
           ..clear()
           ..addAll(shifted);
-        _newImages.add(result.file);
+        _newImages.add(readyFile);
         final newIndex = _existingImageUrls.length + _newImages.length - 1;
         if (colorName != null) _photoColorNames[newIndex] = colorName;
       });
+      _saveDraft();
       return;
     }
 
     // Local new image: replace in place (AI or re-confirmed original).
     final localIdx = photoIndex - _existingImageUrls.length;
+    final readyFile = await ImageCompressUtil.compressProductImage(result.file);
+    if (!mounted) return;
     setState(() {
-      _newImages[localIdx] = result.file;
+      _newImages[localIdx] = readyFile;
     });
+    _saveDraft();
   }
 
   Future<void> _showImagePickerSheet() async {
@@ -624,11 +1016,11 @@ class _AddProductPageState extends State<AddProductPage> {
                     borderRadius: BorderRadius.circular(14),
                     side: const BorderSide(color: AppTheme.line),
                   ),
-                  leading: const Icon(Icons.photo_library_outlined, color: AppTheme.primary),
-                  title: const Text('Choose from Photo Gallery'),
+                  leading: const Icon(Icons.photo_camera_outlined, color: AppTheme.primary),
+                  title: const Text('Take Photo with Camera'),
                   onTap: () {
                     Navigator.pop(context);
-                    _pickImage(ImageSource.gallery);
+                    _pickImage(ImageSource.camera);
                   },
                 ),
                 const SizedBox(height: 8),
@@ -637,11 +1029,11 @@ class _AddProductPageState extends State<AddProductPage> {
                     borderRadius: BorderRadius.circular(14),
                     side: const BorderSide(color: AppTheme.line),
                   ),
-                  leading: const Icon(Icons.photo_camera_outlined, color: AppTheme.primary),
-                  title: const Text('Take Photo with Camera'),
+                  leading: const Icon(Icons.photo_library_outlined, color: AppTheme.primary),
+                  title: const Text('Choose from Photo Gallery'),
                   onTap: () {
                     Navigator.pop(context);
-                    _pickImage(ImageSource.camera);
+                    _pickImage(ImageSource.gallery);
                   },
                 ),
               ],
@@ -657,9 +1049,12 @@ class _AddProductPageState extends State<AddProductPage> {
       setState(() => _error = 'Product name is required');
       return;
     }
-    if (_hasBarcode && _barcode.text.trim().isEmpty) {
-      setState(() => _error = 'Barcode is required for barcoded products');
+    if (_hasBarcode) {
+      final barcodeErr = BarcodeValidator.validate(_barcode.text);
+      if (barcodeErr != null) {
+        setState(() => _error = barcodeErr);
       return;
+      }
     }
     if (_pricingType != 'dynamic' && _shopPrice.text.trim().isEmpty) {
       setState(() => _error = 'Shop selling price is required');
@@ -670,7 +1065,7 @@ class _AddProductPageState extends State<AddProductPage> {
       return;
     }
     final desc = _description.text.trim();
-    if (desc.isNotEmpty && desc.length < 10) {
+    if (desc.length < 10) {
       setState(() => _error = 'Description must be at least 10 characters');
       return;
     }
@@ -687,26 +1082,46 @@ class _AddProductPageState extends State<AddProductPage> {
     });
 
     try {
-      // Upload new local photos first so colour→image mapping can use real URLs.
+      // Upload new local photos (bounded parallel) so colour→image mapping
+      // can use real URLs. Order of galleryUrls matches _newImages.
       final galleryUrls = List<String>.from(_existingImageUrls);
       String? uploadWarn;
+      final uploaded = List<String?>.filled(_newImages.length, null);
       for (var i = 0; i < _newImages.length; i++) {
-        final file = _newImages[i];
+        _newImages[i] =
+            await ImageCompressUtil.compressProductImage(_newImages[i]);
+      }
+      const concurrency = 3;
+      var nextIndex = 0;
+      Future<void> uploadWorker() async {
+        while (true) {
+          final i = nextIndex++;
+          if (i >= _newImages.length) return;
+          if (uploadWarn != null) return;
+          try {
+            uploaded[i] =
+                await OnboardingApi.uploadProductImage(_newImages[i]);
+          } catch (e) {
+            uploadWarn ??= OnboardingApi.toUserMessage(e);
+          }
+        }
+      }
+      final workers = math.min(concurrency, _newImages.length);
+      if (workers > 0) {
+        await Future.wait(List.generate(workers, (_) => uploadWorker()));
+      }
+      for (var i = 0; i < uploaded.length; i++) {
+        final url = uploaded[i];
+        if (url == null) break;
+        galleryUrls.add(url);
         final photoIndex = _existingImageUrls.length + i;
-        try {
-          final url = await OnboardingApi.uploadProductImage(file);
-          galleryUrls.add(url);
-          final colorName = _photoColorNames[photoIndex];
-          if (colorName != null) {
-            for (final c in _colors) {
-              if (c.name.toLowerCase() == colorName.toLowerCase()) {
-                c.imageUrl = url;
-              }
+        final colorName = _photoColorNames[photoIndex];
+        if (colorName != null) {
+          for (final c in _colors) {
+            if (c.name.toLowerCase() == colorName.toLowerCase()) {
+              c.imageUrl = url;
             }
           }
-        } catch (e) {
-          uploadWarn = OnboardingApi.toUserMessage(e);
-          break;
         }
       }
 
@@ -724,15 +1139,21 @@ class _AddProductPageState extends State<AddProductPage> {
       if (uploadWarn != null &&
           galleryUrls.length == _existingImageUrls.length &&
           _newImages.isNotEmpty) {
+        final compressedFallback = <File>[];
+        for (final f in _newImages) {
+          compressedFallback.add(await ImageCompressUtil.compressProductImage(f));
+        }
         final fields = _productFields(
           finalStock: finalStock,
           keepUrls: _existingImageUrls,
           description: desc,
           colors: _colors.map((c) => c.toJson()).toList(),
         );
-        final saved = await _persistProduct(fields, imageFiles: _newImages);
+        final saved = await _persistProduct(fields, imageFiles: compressedFallback);
         if (!mounted) return;
         _showSavedSnack(saved, uploadWarnOverride: uploadWarn);
+        await _clearDraft();
+        if (!mounted) return;
         context.pop();
         return;
       }
@@ -753,6 +1174,8 @@ class _AddProductPageState extends State<AddProductPage> {
         _newImages.clear();
       });
       _showSavedSnack(saved, uploadWarnOverride: uploadWarn);
+      await _clearDraft();
+      if (!mounted) return;
       context.pop();
     } catch (e) {
       if (!mounted) return;
@@ -772,6 +1195,7 @@ class _AddProductPageState extends State<AddProductPage> {
         _newImages.removeAt(index);
       }
     });
+    _saveDraft();
   }
 
   Map<String, String> _productFields({
@@ -1210,22 +1634,68 @@ class _AddProductPageState extends State<AddProductPage> {
                       const SizedBox(height: 14),
                       Row(
                         children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(10),
-                            child: Container(
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: AppTheme.canvas,
+                          Stack(
+                            children: [
+                              ClipRRect(
                                 borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: AppTheme.line),
+                                child: Container(
+                                  width: 56,
+                                  height: 56,
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.canvas,
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: AppTheme.line),
+                                  ),
+                                  child: file != null
+                                      ? Image.file(
+                                          file,
+                                          fit: BoxFit.cover,
+                                          cacheWidth: 112,
+                                          cacheHeight: 112,
+                                        )
+                                      : (existingRemoteUrl != null
+                                          ? Image.network(
+                                              existingRemoteUrl,
+                                              fit: BoxFit.cover,
+                                              cacheWidth: 112,
+                                              cacheHeight: 112,
+                                            )
+                                          : const Icon(
+                                              Icons.image,
+                                              color: AppTheme.muted,
+                                            )),
+                                ),
                               ),
-                              child: file != null
-                                  ? Image.file(file, fit: BoxFit.cover)
-                                  : (existingRemoteUrl != null
-                                      ? Image.network(existingRemoteUrl, fit: BoxFit.cover)
-                                      : const Icon(Icons.image, color: AppTheme.muted)),
-                            ),
+                              Positioned(
+                                right: 0,
+                                bottom: 0,
+                                child: Material(
+                                  color: Colors.black87,
+                                  borderRadius: const BorderRadius.only(
+                                    topLeft: Radius.circular(8),
+                                    bottomRight: Radius.circular(10),
+                                  ),
+                                  child: InkWell(
+                                    onTap: () => _openPhotoFullscreen(
+                                      file: file,
+                                      url: existingRemoteUrl,
+                                    ),
+                                    borderRadius: const BorderRadius.only(
+                                      topLeft: Radius.circular(8),
+                                      bottomRight: Radius.circular(10),
+                                    ),
+                                    child: const Padding(
+                                      padding: EdgeInsets.all(5),
+                                      child: Icon(
+                                        Icons.fullscreen_rounded,
+                                        size: 16,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(width: 12),
                           Expanded(
@@ -1245,35 +1715,74 @@ class _AddProductPageState extends State<AddProductPage> {
                                   currentPhotoColor != null
                                       ? 'Current color: $currentPhotoColor'
                                       : 'Assign color variant to Photo #${photoIndex + 1}',
-                                  style: const TextStyle(fontSize: 12, color: AppTheme.muted),
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AppTheme.muted,
+                                  ),
                                 ),
                               ],
                             ),
                           ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: () async {
-                            Navigator.pop(ctx);
-                            await _enhanceGalleryPhoto(photoIndex);
-                          },
-                          icon: const Icon(Icons.auto_awesome, size: 18),
-                          label: const Text(
-                            'Enhance with AI',
-                            style: TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppTheme.primary,
-                            side: const BorderSide(color: AppTheme.primary),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
+                          IconButton(
+                            tooltip: 'Expand',
+                            onPressed: () => _openPhotoFullscreen(
+                              file: file,
+                              url: existingRemoteUrl,
+                            ),
+                            icon: const Icon(
+                              Icons.open_in_full_rounded,
+                              color: AppTheme.ink,
                             ),
                           ),
-                        ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                Navigator.pop(ctx);
+                                await _editGalleryPhoto(photoIndex);
+                              },
+                              icon: const Icon(Icons.crop_rotate_rounded, size: 18),
+                              label: const Text(
+                                'Edit',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: AppTheme.ink,
+                                side: const BorderSide(color: AppTheme.line),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                Navigator.pop(ctx);
+                                await _enhanceGalleryPhoto(photoIndex);
+                              },
+                              icon: const Icon(Icons.auto_awesome, size: 18),
+                              label: const Text(
+                                'Enhance AI',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: AppTheme.primary,
+                                side: const BorderSide(color: AppTheme.primary),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 16),
 
@@ -1458,24 +1967,39 @@ class _AddProductPageState extends State<AddProductPage> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
-
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          if (currentPhotoColor != null)
-                            TextButton.icon(
-                              onPressed: () => selectColor('NO_COLOR', ''),
-                              icon: const Icon(Icons.close_rounded, size: 16, color: AppTheme.muted),
-                              label: const Text('Clear Color', style: TextStyle(color: AppTheme.muted)),
-                            )
-                          else
-                            const SizedBox.shrink(),
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text('Done / Skip'),
+                      if (currentPhotoColor != null) ...[
+                        const SizedBox(height: 6),
+                        Align(
+                          alignment: Alignment.center,
+                          child: TextButton.icon(
+                            onPressed: () => selectColor('NO_COLOR', ''),
+                            icon: const Icon(Icons.close_rounded, size: 16, color: AppTheme.muted),
+                            label: const Text('Clear Color', style: TextStyle(color: AppTheme.muted)),
                           ),
-                        ],
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppTheme.primary,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text(
+                            'Done',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -1694,6 +2218,9 @@ class _AddProductPageState extends State<AddProductPage> {
                         child: Image.network(
                           _existingImageUrls[i],
                                 fit: BoxFit.cover,
+                          cacheWidth: 220,
+                          cacheHeight: 244,
+                          filterQuality: FilterQuality.medium,
                                 errorBuilder: (_, _, _) => const Center(
                                   child: Icon(
                                     Icons.broken_image_outlined,
@@ -1709,7 +2236,12 @@ class _AddProductPageState extends State<AddProductPage> {
                     for (var i = 0; i < _newImages.length; i++) ...[
                       _photoThumb(
                         photoIndex: _existingImageUrls.length + i,
-                        child: Image.file(_newImages[i], fit: BoxFit.cover),
+                        child: Image.file(
+                          _newImages[i],
+                          fit: BoxFit.cover,
+                          cacheWidth: 220,
+                          cacheHeight: 220,
+                        ),
                         onRemove: () =>
                             _removeGalleryAt(existing: false, index: i),
                       ),
@@ -1759,22 +2291,41 @@ class _AddProductPageState extends State<AddProductPage> {
               children: [
                 const FieldLabel('Barcode', required: true),
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Expanded(
-                      child: TextField(
+                      child: ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: _barcode,
+                        builder: (context, value, _) {
+                          final text = value.text.trim();
+                          final errorText = text.isNotEmpty
+                              ? BarcodeValidator.validate(text)
+                              : null;
+                          return TextField(
                         controller: _barcode,
-                        decoration: const InputDecoration(
+                            decoration: InputDecoration(
                           hintText: 'Enter or scan barcode',
-                          prefixIcon: Icon(Icons.qr_code_2_rounded),
+                              prefixIcon: const Icon(Icons.qr_code_2_rounded),
+                              errorText: errorText,
+                              errorMaxLines: 2,
                         ),
+                            inputFormatters: [
+                              FilteringTextInputFormatter.deny(RegExp(r'\s')),
+                            ],
                         onSubmitted: (v) {
                           final code = v.trim();
-                          if (code.isNotEmpty) _applyCatalogLookup(code);
+                              if (code.isNotEmpty && BarcodeValidator.isValid(code)) {
+                                _applyCatalogLookup(code);
+                              }
+                            },
+                          );
                         },
                       ),
                     ),
                     const SizedBox(width: 10),
-                    ElevatedButton(
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                       ),
@@ -1789,6 +2340,7 @@ class _AddProductPageState extends State<AddProductPage> {
                               ),
                             )
                           : const Icon(Icons.qr_code_scanner_rounded, size: 20),
+                      ),
                     ),
                   ],
                 ),
@@ -1868,7 +2420,7 @@ class _AddProductPageState extends State<AddProductPage> {
                 ),
               ),
               const SizedBox(height: 14),
-              const FieldLabel('Description'),
+              const FieldLabel('Description', required: true),
               TextField(
                 controller: _description,
                 minLines: 3,
@@ -1882,7 +2434,7 @@ class _AddProductPageState extends State<AddProductPage> {
               ),
               const SizedBox(height: 4),
               const Text(
-                'Optional for POS. Recommended for website / ECOM — at least 10 characters if filled.',
+                'Required — minimum 10 characters.',
                 style: TextStyle(fontSize: 11.5, color: AppTheme.muted, height: 1.3),
               ),
               const SizedBox(height: 14),

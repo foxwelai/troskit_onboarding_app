@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../api.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/map_location_picker_page.dart';
 import '../../core/widgets/ui_kit.dart';
 
 class OnboardShopPage extends StatefulWidget {
@@ -62,6 +64,7 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
   final String _shopType = 'store'; // Hardcoded store type (switch hidden per requirements)
   bool _busy = false;
   String? _error;
+  LatLng? _pinnedLocation;
 
   @override
   void dispose() {
@@ -210,6 +213,22 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
     );
   }
 
+  Future<void> _pickStoreOnMap() async {
+    final picked = await Navigator.of(context).push<LatLng>(
+      MaterialPageRoute(
+        builder: (_) => MapLocationPickerPage(
+          initial: _pinnedLocation,
+          title: 'Pin store on map',
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _pinnedLocation = picked;
+      _error = null;
+    });
+  }
+
   Future<void> _submit() async {
     final name = _shopName.text.trim();
     final owner = _ownerName.text.trim();
@@ -227,6 +246,13 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
       setState(() => _error = 'Please enter a valid phone number');
       return;
     }
+    if (_pinnedLocation == null) {
+      setState(
+        () => _error =
+            'Pin the store location on the map before submitting',
+      );
+      return;
+    }
 
     setState(() {
       _busy = true;
@@ -234,6 +260,7 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
     });
 
     try {
+      final pin = _pinnedLocation!;
       await OnboardingApi.createShop({
         'shop_name': name,
         'owner_name': owner,
@@ -241,6 +268,8 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
         'phone_no': phone,
         'shop_type': _shopType,
         'shop_gps_address': _gps.text.trim(),
+        'latitude': pin.latitude,
+        'longitude': pin.longitude,
         'momo_network': _selectedMomoNetwork,
         'momo_number': _momoNumber.text.trim(),
         'momo_name': _momoName.text.trim(),
@@ -250,7 +279,7 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Walk-in shop registered — pending admin verification. Add products next.',
+            'Shop registered — POSS approval and ECOM listing are pending admin review.',
           ),
           backgroundColor: Color(0xFF15803D),
         ),
@@ -286,7 +315,8 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
             ),
             child: const Text(
               'Website vendors apply on /sell and are assigned by admin — they already appear under Assigned Shops. '
-              'Use this form only for walk-in / field registrations.',
+              'Use this form only for walk-in / field registrations. '
+              'Creating a shop also submits an ECOM listing request for admin approval (map pin required).',
               style: TextStyle(
                 fontSize: 12.5,
                 color: Color(0xFF9A3412),
@@ -298,7 +328,8 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
           const SizedBox(height: 12),
           SectionCard(
             title: 'Business Information',
-            subtitle: 'Register a walk-in store for Troskit admin review.',
+            subtitle:
+                'Register a walk-in store. POSS + ECOM listing both go to admin for review.',
             children: [
               const FieldLabel('Business name', required: true),
               TextField(
@@ -346,9 +377,82 @@ class _OnboardShopPageState extends State<OnboardShopPage> {
           const SizedBox(height: 14),
           SectionCard(
             title: 'Store Location',
-            subtitle: 'GhanaPost GPS address to pin store location.',
+            subtitle: 'Pin the exact store on the map (required for ECOM listing).',
             children: [
-              const FieldLabel('GhanaPost GPS address'),
+              const FieldLabel('Map pin', required: true),
+              Material(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: _busy ? null : _pickStoreOnMap,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 14,
+                    ),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: _pinnedLocation == null
+                            ? AppTheme.line
+                            : AppTheme.primary,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.map_rounded,
+                          color: _pinnedLocation == null
+                              ? AppTheme.muted
+                              : AppTheme.primary,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _pinnedLocation == null
+                                    ? 'Tap to pin store on map'
+                                    : 'Store pinned on map',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 14,
+                                  color: _pinnedLocation == null
+                                      ? AppTheme.muted
+                                      : AppTheme.ink,
+                                ),
+                              ),
+                              if (_pinnedLocation != null) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${_pinnedLocation!.latitude.toStringAsFixed(5)}, ${_pinnedLocation!.longitude.toStringAsFixed(5)}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        Text(
+                          _pinnedLocation == null ? 'Open map' : 'Change',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: AppTheme.primary,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              const FieldLabel('GhanaPost GPS address (optional)'),
               TextField(
                 controller: _gps,
                 decoration: const InputDecoration(

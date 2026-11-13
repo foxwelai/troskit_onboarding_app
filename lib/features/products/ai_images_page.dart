@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../core/services/ai_image_vault.dart';
+import '../../core/services/maintenance_service.dart';
 import '../../core/theme/app_theme.dart';
 
 /// Library of AI-generated product images saved on-device.
@@ -26,10 +27,12 @@ class _AiImagesPageState extends State<AiImagesPage> {
   }
 
   void _reload() {
+    MaintenanceService.instance.checkStatus();
     setState(() {
-      _future = AiImageVault.list();
+      _future = AiImageVault.listWithFiles();
     });
   }
+
 
   Future<void> _openImage(AiVaultImage entry) async {
     final changed = await Navigator.of(context).push<bool>(
@@ -107,11 +110,8 @@ class _AiImagesPageState extends State<AiImagesPage> {
               itemCount: items.length,
               itemBuilder: (context, i) {
                 final entry = items[i];
-                return FutureBuilder<File?>(
-                  future: AiImageVault.fileFor(entry),
-                  builder: (context, fileSnap) {
-                    final file = fileSnap.data;
-                    return InkWell(
+                final file = entry.file;
+                return InkWell(
                       onTap: () => _openImage(entry),
                       borderRadius: BorderRadius.circular(16),
                       child: Ink(
@@ -129,7 +129,12 @@ class _AiImagesPageState extends State<AiImagesPage> {
                                   top: Radius.circular(15),
                                 ),
                                 child: file != null
-                                    ? Image.file(file, fit: BoxFit.cover)
+                                    ? Image.file(
+                                        file,
+                                        fit: BoxFit.cover,
+                                        cacheWidth: 400,
+                                        cacheHeight: 400,
+                                      )
                                     : const ColoredBox(
                                         color: AppTheme.canvas,
                                         child: Icon(
@@ -169,8 +174,6 @@ class _AiImagesPageState extends State<AiImagesPage> {
                         ),
                       ),
                     );
-                  },
-                );
               },
             ),
           );
